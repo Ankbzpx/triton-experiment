@@ -3,6 +3,7 @@ import torch
 from torch.profiler import profile, record_function, ProfilerActivity
 from scipy.spatial.distance import cdist
 
+import mash_cpp
 import triton
 import triton.language as tl
 
@@ -81,6 +82,7 @@ def matmul(A: torch.Tensor, B: torch.Tensor):
                         C.stride(1), **config)
     return C
 
+
 @triton.jit
 def nm_dist_kernel(xyz1_ptr, xyz2_ptr, dist_ptr, indices_ptr, lock_ptr, N, M,
                    xyz1_stride_n, xyz1_stride_d, xyz2_stride_m, xyz2_stride_d,
@@ -89,56 +91,63 @@ def nm_dist_kernel(xyz1_ptr, xyz2_ptr, dist_ptr, indices_ptr, lock_ptr, N, M,
 
     # TODO: More L2 cache friendly launch
     pid_n = tl.program_id(axis=0)
+    pid_m = tl.program_id(axis=1)
+
+    # num_pid_n = tl.num_programs(axis=0)
+    # num_pid_m = tl.num_programs(axis=1)
+    # pid_n, pid_m = tl.swizzle2d(pid_n, pid_m, num_pid_n, num_pid_m, 16)
+
     base_n = pid_n * BLOCK_SIZE_N
+    base_m = pid_m * BLOCK_SIZE_M
 
-    for pid_m in range((M + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M):
-        base_m = pid_m * BLOCK_SIZE_M
+    batch_base_n = base_n + tl.arange(0, BLOCK_SIZE_N)
+    batch_n_mask = batch_base_n < N
+    xyz1_x = tl.load(xyz1_ptr + batch_base_n * xyz1_stride_n,
+                     mask=batch_n_mask,
+                     other=100)
+    xyz1_y = tl.load(xyz1_ptr + batch_base_n * xyz1_stride_n + xyz1_stride_d,
+                     mask=batch_n_mask,
+                     other=100)
+    xyz1_z = tl.load(xyz1_ptr + batch_base_n * xyz1_stride_n +
+                     2 * xyz1_stride_d,
+                     mask=batch_n_mask,
+                     other=100)
 
-        batch_base_n = base_n + tl.arange(0, BLOCK_SIZE_N)
-        batch_n_mask = batch_base_n < N
-        xyz1_x = tl.load(xyz1_ptr + batch_base_n * xyz1_stride_n,
-                         mask=batch_n_mask,
-                         other=100)
-        xyz1_y = tl.load(xyz1_ptr + batch_base_n * xyz1_stride_n +
-                         xyz1_stride_d,
-                         mask=batch_n_mask,
-                         other=100)
-        xyz1_z = tl.load(xyz1_ptr + batch_base_n * xyz1_stride_n +
-                         2 * xyz1_stride_d,
-                         mask=batch_n_mask,
-                         other=100)
+    batch_base_m = base_m + tl.arange(0, BLOCK_SIZE_M)
+    batch_m_mask = batch_base_m < M
+    xyz2_x = tl.load(xyz2_ptr + batch_base_m * xyz2_stride_m,
+                     mask=batch_m_mask,
+                     other=-100)
+    xyz2_y = tl.load(xyz2_ptr + batch_base_m * xyz2_stride_m + xyz2_stride_d,
+                     mask=batch_m_mask,
+                     other=-100)
+    xyz2_z = tl.load(xyz2_ptr + batch_base_m * xyz2_stride_m +
+                     2 * xyz2_stride_d,
+                     mask=batch_m_mask,
+                     other=-100)
 
-        batch_base_m = base_m + tl.arange(0, BLOCK_SIZE_M)
-        batch_m_mask = batch_base_m < M
-        xyz2_x = tl.load(xyz2_ptr + batch_base_m * xyz2_stride_m,
-                         mask=batch_m_mask,
-                         other=-100)
-        xyz2_y = tl.load(xyz2_ptr + batch_base_m * xyz2_stride_m +
-                         xyz2_stride_d,
-                         mask=batch_m_mask,
-                         other=-100)
-        xyz2_z = tl.load(xyz2_ptr + batch_base_m * xyz2_stride_m +
-                         2 * xyz2_stride_d,
-                         mask=batch_m_mask,
-                         other=-100)
+    x2 = xyz1_x[:, None] - xyz2_x[None, :]
+    y2 = xyz1_y[:, None] - xyz2_y[None, :]
+    z2 = xyz1_z[:, None] - xyz2_z[None, :]
+    d = x2 * x2 + y2 * y2 + z2 * z2
 
-        x2 = xyz1_x[:, None] - xyz2_x[None, :]
-        y2 = xyz1_y[:, None] - xyz2_y[None, :]
-        z2 = xyz1_z[:, None] - xyz2_z[None, :]
-        d = x2 * x2 + y2 * y2 + z2 * z2
+    best_d = tl.sqrt(tl.min(d, axis=1))
+    best_idx = tl.argmin(d, axis=1) + base_m
 
-        best_d = tl.sqrt(tl.min(d, axis=1))
-        best_idx = (tl.argmin(d, axis=1) + base_m).cast(tl.int32)
+    lock = lock_ptr + pid_n * lock_stride_n
+    while tl.atomic_cas(lock, 0, 1) == 1:
+        pass
 
-        cur_best_d = tl.load(dist_ptr + batch_base_n * dist_stride_n,
-                             mask=batch_n_mask)
-        out_mask = (best_d < cur_best_d) & batch_n_mask
-        tl.store(dist_ptr + batch_base_n * dist_stride_n,
-                 best_d,
-                 mask=out_mask)
-        tl.store(indices_ptr + batch_base_n * indices_stride_n,
-                 best_idx,
-                 mask=out_mask)
+    cur_best_d = tl.load(dist_ptr + batch_base_n * dist_stride_n,
+                         mask=batch_n_mask)
+    out_mask = (best_d < cur_best_d) & batch_n_mask
+    tl.store(dist_ptr + batch_base_n * dist_stride_n, best_d, mask=out_mask)
+    tl.store(indices_ptr + batch_base_n * indices_stride_n,
+             best_idx,
+             mask=out_mask)
+
+    # Release lock
+    tl.atomic_xchg(lock, 0)
 
 
 def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
@@ -153,7 +162,8 @@ def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
     indices = torch.zeros((N, ), device=xyz1.device, dtype=torch.int32)
     lock = torch.zeros((N, ), device=xyz1.device, dtype=torch.int32)
 
-    grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE_N']), )
+    grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE_N']),
+                         triton.cdiv(M, META['BLOCK_SIZE_M']))
 
     config = {"BLOCK_SIZE_N": 16, "BLOCK_SIZE_M": 512}
 
@@ -169,21 +179,56 @@ if __name__ == "__main__":
 
     torch.manual_seed(0)
 
-    xyz1 = torch.randn(1984, 3).cuda()
-    xyz2 = torch.randn(278, 3).cuda()
+    # xyz1 = torch.randn(17, 3).cuda()
+    # xyz2 = torch.randn(33, 3).cuda()
 
-    triton_out = nm_dist(xyz1, xyz2)[1].cpu()
-    ic(triton_out)
+    # triton_out = nm_dist(xyz1, xyz2)[1].cpu()
+    # ref_out = closest_neighbour_sp(xyz1.cpu().numpy(), xyz2.cpu().numpy())[1]
 
-    ref_out = closest_neighbour_sp(xyz1.cpu().numpy(), xyz2.cpu().numpy())[1]
-    ic(ref_out)
-    ic(np.isclose(triton_out, ref_out).sum() == len(xyz1))
+    # ic(triton_out)
+    # ic(ref_out)
+    # ic(np.isclose(triton_out, ref_out).sum() == len(xyz1))
+
+    # exit()
+
+    configs = []
+    configs.append(
+        triton.testing.Benchmark(
+            x_names=["N", "M"],
+            x_vals=[4 * np.power(10, i) for i in range(1, 6)],
+            line_arg="provider",
+            line_vals=["Triton", "MashCPP"],
+            line_names=["Triton", "MashCPP"],
+            styles=[("green", "-"), ("blue", "-")],
+            ylabel="TFLOPS",
+            plot_name="NMDist Performance",
+            args={}))
+
+    def chamfer_triton(xyz1, xyz2):
+        d1, i1 = nm_dist(xyz1, xyz2)
+        d2, i2 = nm_dist(xyz2, xyz1)
+        return d1, i1, d2, i2
+
+    @triton.testing.perf_report(configs)
+    def benchmark(M, N, provider):
+        xyz1 = torch.randn(M, 3).cuda()
+        xyz2 = torch.randn(N, 3).cuda()
+        quantiles = [0.5, 0.2, 0.8]
+        if provider == "MashCPP":
+            ms, min_ms, max_ms = triton.testing.do_bench(
+                lambda: mash_cpp.toChamferDistance(xyz1, xyz2),
+                quantiles=quantiles)
+        if provider == "Triton":
+            ms, min_ms, max_ms = triton.testing.do_bench(
+                lambda: chamfer_triton(xyz1, xyz2), quantiles=quantiles)
+        perf = lambda ms: 2 * M * N * 1e-12 / (ms * 1e-3)
+        return perf(ms), perf(max_ms), perf(min_ms)
+
+    benchmark.run(show_plots=True, print_data=True)
 
     exit()
 
-    import mash_cpp
-
-    num_pts = 4000
+    num_pts = 400000
 
     with profile(activities=[ProfilerActivity.CUDA],
                  record_shapes=True) as prof:
@@ -191,8 +236,7 @@ if __name__ == "__main__":
         xyz2 = torch.randn(num_pts, 3).cuda()
 
         with record_function("Triton"):
-            nm_dist(xyz1, xyz2)
-            nm_dist(xyz2, xyz1)
+            nm_dist(xyz1, xyz2)[1]
 
         with record_function("MashCPP"):
             mash_cpp.toChamferDistance(xyz1, xyz2)
@@ -225,7 +269,6 @@ if __name__ == "__main__":
     # ic(torch.isclose(C_triton, C_torch))
     exit()
 
-    import extension_cpp
     import closest_neighbour
     from torch.profiler import profile, record_function, ProfilerActivity
 
