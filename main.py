@@ -83,19 +83,135 @@ def matmul(A: torch.Tensor, B: torch.Tensor):
     return C
 
 
+def get_cuda_autotune_config():
+    return [
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 16,
+                'BLOCK_SIZE_M': 512,
+                'GROUP_SIZE': 16
+            },
+            num_warps=4,
+            num_stages=3),
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 16,
+                'BLOCK_SIZE_M': 512,
+                'GROUP_SIZE': 16
+            },
+            num_warps=2,
+            num_stages=3),
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 32,
+                'BLOCK_SIZE_M': 512,
+                'GROUP_SIZE': 16
+            },
+            num_warps=4,
+            num_stages=3),
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 32,
+                'BLOCK_SIZE_M': 512,
+                'GROUP_SIZE': 16
+            },
+            num_warps=2,
+            num_stages=3),
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 32,
+                'BLOCK_SIZE_M': 512,
+                'GROUP_SIZE': 32
+            },
+            num_warps=4,
+            num_stages=3),
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 32,
+                'BLOCK_SIZE_M': 512,
+                'GROUP_SIZE': 32
+            },
+            num_warps=2,
+            num_stages=3),
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 64,
+                'BLOCK_SIZE_M': 512,
+                'GROUP_SIZE': 16
+            },
+            num_warps=4,
+            num_stages=3),
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 64,
+                'BLOCK_SIZE_M': 512,
+                'GROUP_SIZE': 16
+            },
+            num_warps=2,
+            num_stages=3),
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 64,
+                'BLOCK_SIZE_M': 512,
+                'GROUP_SIZE': 32
+            },
+            num_warps=4,
+            num_stages=3),
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 64,
+                'BLOCK_SIZE_M': 512,
+                'GROUP_SIZE': 32
+            },
+            num_warps=2,
+            num_stages=3),
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 64,
+                'BLOCK_SIZE_M': 512,
+                'GROUP_SIZE': 64
+            },
+            num_warps=4,
+            num_stages=3),
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 64,
+                'BLOCK_SIZE_M': 512,
+                'GROUP_SIZE': 64
+            },
+            num_warps=2,
+            num_stages=3),
+    ]
+
+
+@triton.autotune(
+    # configs=get_cuda_autotune_config(),
+    configs=[
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 16,
+                'BLOCK_SIZE_M': 512,
+                'GROUP_SIZE': 16
+            },
+            num_warps=2,
+            num_stages=3),
+    ],
+    key=['M', 'N'],
+)
 @triton.jit
 def nm_dist_kernel(xyz1_ptr, xyz2_ptr, dist_ptr, indices_ptr, lock_ptr, N, M,
                    xyz1_stride_n, xyz1_stride_d, xyz2_stride_m, xyz2_stride_d,
                    dist_stride_n, indices_stride_n, lock_stride_n,
-                   BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_M: tl.constexpr):
+                   BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_M: tl.constexpr,
+                   GROUP_SIZE: tl.constexpr):
 
-    # TODO: More L2 cache friendly launch
     pid_n = tl.program_id(axis=0)
     pid_m = tl.program_id(axis=1)
 
-    # num_pid_n = tl.num_programs(axis=0)
-    # num_pid_m = tl.num_programs(axis=1)
-    # pid_n, pid_m = tl.swizzle2d(pid_n, pid_m, num_pid_n, num_pid_m, 16)
+    # More L2 cache friendly launch
+    num_pid_n = tl.num_programs(axis=0)
+    num_pid_m = tl.num_programs(axis=1)
+    pid_n, pid_m = tl.swizzle2d(pid_n, pid_m, num_pid_n, num_pid_m, GROUP_SIZE)
 
     base_n = pid_n * BLOCK_SIZE_N
     base_m = pid_m * BLOCK_SIZE_M
@@ -165,12 +281,10 @@ def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
     grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE_N']),
                          triton.cdiv(M, META['BLOCK_SIZE_M']))
 
-    config = {"BLOCK_SIZE_N": 16, "BLOCK_SIZE_M": 512}
-
     nm_dist_kernel[grid](xyz1, xyz2, dists, indices, lock, N, M,
                          xyz1.stride(0), xyz1.stride(1), xyz2.stride(0),
                          xyz2.stride(1), dists.stride(0), indices.stride(0),
-                         lock.stride(0), **config)
+                         lock.stride(0))
 
     return dists, indices
 
@@ -179,17 +293,37 @@ if __name__ == "__main__":
 
     torch.manual_seed(0)
 
-    # xyz1 = torch.randn(17, 3).cuda()
-    # xyz2 = torch.randn(33, 3).cuda()
+    xyz1 = torch.randn(17, 3).cuda()
+    xyz2 = torch.randn(33, 3).cuda()
 
-    # triton_out = nm_dist(xyz1, xyz2)[1].cpu()
-    # ref_out = closest_neighbour_sp(xyz1.cpu().numpy(), xyz2.cpu().numpy())[1]
+    dist1, idx1 = nm_dist(xyz1, xyz2)
+    dist2, idx2 = nm_dist(xyz2, xyz1)
+    dist1_ref, idx1_ref, dist2_ref, idx2_ref = closest_neighbour_sp(
+        xyz1.cpu().numpy(),
+        xyz2.cpu().numpy())
 
-    # ic(triton_out)
-    # ic(ref_out)
-    # ic(np.isclose(triton_out, ref_out).sum() == len(xyz1))
+    ic(np.isclose(dist1.cpu(), dist1_ref).sum() == len(xyz1))
+    ic(np.isclose(idx1.cpu(), idx1_ref).sum() == len(xyz1))
+    ic(np.isclose(dist2.cpu(), dist2_ref).sum() == len(xyz2))
+    ic(np.isclose(idx2.cpu(), idx2_ref).sum() == len(xyz2))
 
-    # exit()
+    exit()
+
+    num_pts = 400000
+
+    with profile(activities=[ProfilerActivity.CUDA],
+                 record_shapes=True) as prof:
+        xyz1 = torch.randn(num_pts, 3).cuda()
+        xyz1.requires_grad_(True)
+        xyz2 = torch.randn(num_pts, 3).cuda()
+
+        with record_function("Triton"):
+            triton_out = nm_dist(xyz1, xyz2)
+            triton_out2 = nm_dist(xyz2, xyz1)
+
+    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+
+    exit()
 
     configs = []
     configs.append(
