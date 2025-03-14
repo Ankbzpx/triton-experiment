@@ -122,21 +122,10 @@ def get_cuda_autotune_config():
     ]
 
 
-@triton.autotune(
-    # configs=get_cuda_autotune_config(),
-    configs=[
-        triton.Config(
-            {
-                'BLOCK_SIZE_N': 16,
-                'BLOCK_SIZE_M': 512,
-                'GROUP_SIZE': 16
-            },
-            num_warps=2,
-            num_stages=3),
-    ],
-    # key=['M', 'N'],
-    # FIXME: Figure out how to specify num_warps in kernel launch
-    key=[])
+# @triton.autotune(
+#     configs=get_cuda_autotune_config(),
+#     key=['M', 'N']
+#     )
 @triton.jit
 def nm_dist_kernel(xyz1_ptr, xyz2_ptr, dists_ptr, indices_ptr, lock_ptr, N, M,
                    xyz1_stride_n, xyz1_stride_d, xyz2_stride_m, xyz2_stride_d,
@@ -224,10 +213,18 @@ def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
     grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE_N']),
                          triton.cdiv(M, META['BLOCK_SIZE_M']))
 
+    configs = {
+        'BLOCK_SIZE_N': 16,
+        'BLOCK_SIZE_M': 512,
+        'GROUP_SIZE': 16,
+        "num_warps": 2,
+        "num_stages": 3
+    }
+
     nm_dist_kernel[grid](xyz1, xyz2, dists, indices, lock, N, M,
                          xyz1.stride(0), xyz1.stride(1), xyz2.stride(0),
                          xyz2.stride(1), dists.stride(0), indices.stride(0),
-                         lock.stride(0))
+                         lock.stride(0), **configs)
 
     return dists, indices
 
