@@ -142,10 +142,9 @@ def get_cuda_autotune_config():
 #     key=['M', 'N']
 #     )
 @triton.jit
-def nm_dist_kernel(xyz1_ptr, xyz2_ptr, lock_init_ptr, lock_ptr, dists_ptr,
-                   indices_ptr, N, M, xyz1_stride_n, xyz1_stride_d,
-                   xyz2_stride_m, xyz2_stride_d, dist_stride_n,
-                   indices_stride_n, lock_init_stride, lock_stride,
+def nm_dist_kernel(xyz1_ptr, xyz2_ptr, lock_ptr, dists_ptr, indices_ptr, N, M,
+                   xyz1_stride_n, xyz1_stride_d, xyz2_stride_m, xyz2_stride_d,
+                   dist_stride_n, indices_stride_n, lock_stride,
                    BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_M: tl.constexpr,
                    GROUP_SIZE: tl.constexpr):
 
@@ -197,29 +196,21 @@ def nm_dist_kernel(xyz1_ptr, xyz2_ptr, lock_init_ptr, lock_ptr, dists_ptr,
     # best_d = tl.sqrt(best_d)
     best_idx = tl.argmin(d, axis=1) + base_m
 
-    lock_init = lock_init_ptr + pid_n * lock_stride
     lock = lock_ptr + pid_n * lock_stride
     while tl.atomic_cas(lock, 0, 1) == 1:
         pass
 
-    if tl.atomic_cas(lock_init, 0, 1) == 0:
-        tl.store(dists_ptr + batch_base_n * dist_stride_n,
-                 best_d,
-                 mask=batch_n_mask)
-        tl.store(indices_ptr + batch_base_n * indices_stride_n,
-                 best_idx,
-                 mask=batch_n_mask)
-    else:
-        cur_best_d = tl.load(dists_ptr + batch_base_n * dist_stride_n,
-                             mask=batch_n_mask)
-        # FIXME: Handle zero initialization in JAX. There should be a better approach
-        out_mask = (best_d < cur_best_d) & batch_n_mask
-        tl.store(dists_ptr + batch_base_n * dist_stride_n,
-                 best_d,
-                 mask=out_mask)
-        tl.store(indices_ptr + batch_base_n * indices_stride_n,
-                 best_idx,
-                 mask=out_mask)
+    cur_best_d = tl.load(dists_ptr + batch_base_n * dist_stride_n,
+                         mask=batch_n_mask)
+    # Handle zero initialization in JAX
+    # Should be safe, as the initial values are not likely to be exactly zero
+    # It can be replaced by lock, but at the cost of additional control flow
+    # FIXME: Figure out a better approach
+    out_mask = ((best_d < cur_best_d) | (cur_best_d == 0)) & batch_n_mask
+    tl.store(dists_ptr + batch_base_n * dist_stride_n, best_d, mask=out_mask)
+    tl.store(indices_ptr + batch_base_n * indices_stride_n,
+             best_idx,
+             mask=out_mask)
 
     # Release lock
     tl.atomic_xchg(lock, 0)
@@ -236,7 +227,6 @@ def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
     dists = torch.zeros((N, ), device=xyz1.device, dtype=xyz1.dtype)
     indices = torch.zeros((N, ), device=xyz1.device, dtype=torch.int32)
     # FIXME: The lock size is overkill
-    lock_init = torch.zeros((N, ), device=xyz1.device, dtype=torch.int32)
     lock = torch.zeros((N, ), device=xyz1.device, dtype=torch.int32)
 
     grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE_N']),
@@ -250,10 +240,10 @@ def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
         "num_stages": 3
     }
 
-    nm_dist_kernel[grid](xyz1, xyz2, lock_init, lock, dists, indices, N, M,
+    nm_dist_kernel[grid](xyz1, xyz2, lock, dists, indices, N, M,
                          xyz1.stride(0), xyz1.stride(1), xyz2.stride(0),
                          xyz2.stride(1), dists.stride(0), indices.stride(0),
-                         lock_init.stride(0), lock.stride(0), **configs)
+                         lock.stride(0), **configs)
 
     return dists, indices
 
