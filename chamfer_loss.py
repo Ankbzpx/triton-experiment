@@ -142,9 +142,10 @@ def get_cuda_autotune_config():
 #     key=['M', 'N']
 #     )
 @triton.jit
-def nm_dist_kernel(xyz1_ptr, xyz2_ptr, lock_ptr, dists_ptr, indices_ptr, N, M,
-                   xyz1_stride_n, xyz1_stride_d, xyz2_stride_m, xyz2_stride_d,
-                   dist_stride_n, indices_stride_n, lock_stride_n,
+def nm_dist_kernel(xyz1_ptr, xyz2_ptr, lock_init_ptr, lock_ptr, dists_ptr,
+                   indices_ptr, N, M, xyz1_stride_n, xyz1_stride_d,
+                   xyz2_stride_m, xyz2_stride_d, dist_stride_n,
+                   indices_stride_n, lock_init_stride, lock_stride,
                    BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_M: tl.constexpr,
                    GROUP_SIZE: tl.constexpr):
 
@@ -196,18 +197,29 @@ def nm_dist_kernel(xyz1_ptr, xyz2_ptr, lock_ptr, dists_ptr, indices_ptr, N, M,
     # best_d = tl.sqrt(best_d)
     best_idx = tl.argmin(d, axis=1) + base_m
 
-    lock = lock_ptr + pid_n * lock_stride_n
+    lock_init = lock_init_ptr + pid_n * lock_stride
+    lock = lock_ptr + pid_n * lock_stride
     while tl.atomic_cas(lock, 0, 1) == 1:
         pass
 
-    cur_best_d = tl.load(dists_ptr + batch_base_n * dist_stride_n,
-                         mask=batch_n_mask)
-    # FIXME: Handle zero initialization in JAX. There should be a better approach
-    out_mask = (best_d < cur_best_d) & batch_n_mask
-    tl.store(dists_ptr + batch_base_n * dist_stride_n, best_d, mask=out_mask)
-    tl.store(indices_ptr + batch_base_n * indices_stride_n,
-             best_idx,
-             mask=out_mask)
+    if tl.atomic_cas(lock_init, 0, 1) == 0:
+        tl.store(dists_ptr + batch_base_n * dist_stride_n,
+                 best_d,
+                 mask=batch_n_mask)
+        tl.store(indices_ptr + batch_base_n * indices_stride_n,
+                 best_idx,
+                 mask=batch_n_mask)
+    else:
+        cur_best_d = tl.load(dists_ptr + batch_base_n * dist_stride_n,
+                             mask=batch_n_mask)
+        # FIXME: Handle zero initialization in JAX. There should be a better approach
+        out_mask = (best_d < cur_best_d) & batch_n_mask
+        tl.store(dists_ptr + batch_base_n * dist_stride_n,
+                 best_d,
+                 mask=out_mask)
+        tl.store(indices_ptr + batch_base_n * indices_stride_n,
+                 best_idx,
+                 mask=out_mask)
 
     # Release lock
     tl.atomic_xchg(lock, 0)
@@ -221,9 +233,10 @@ def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
     N, D = xyz1.shape
     M, D = xyz2.shape
 
-    dists = torch.inf * torch.ones((N, ), device=xyz1.device, dtype=xyz1.dtype)
+    dists = torch.zeros((N, ), device=xyz1.device, dtype=xyz1.dtype)
     indices = torch.zeros((N, ), device=xyz1.device, dtype=torch.int32)
     # FIXME: The lock size is overkill
+    lock_init = torch.zeros((N, ), device=xyz1.device, dtype=torch.int32)
     lock = torch.zeros((N, ), device=xyz1.device, dtype=torch.int32)
 
     grid = lambda META: (triton.cdiv(N, META['BLOCK_SIZE_N']),
@@ -237,10 +250,10 @@ def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
         "num_stages": 3
     }
 
-    nm_dist_kernel[grid](xyz1, xyz2, lock, dists, indices, N, M,
+    nm_dist_kernel[grid](xyz1, xyz2, lock_init, lock, dists, indices, N, M,
                          xyz1.stride(0), xyz1.stride(1), xyz2.stride(0),
                          xyz2.stride(1), dists.stride(0), indices.stride(0),
-                         lock.stride(0), **configs)
+                         lock_init.stride(0), lock.stride(0), **configs)
 
     return dists, indices
 
@@ -324,21 +337,21 @@ if __name__ == "__main__":
     # ic(torch.allclose(d_xyz2_mashcpp, d_xyz2))
     # exit()
 
-    xyz1 = torch.randn(8192, 3).cuda()
-    xyz2 = torch.randn(8192, 3).cuda()
+    # xyz1 = torch.randn(8192, 3).cuda()
+    # xyz2 = torch.randn(8192, 3).cuda()
 
-    dist1, idx1 = nm_dist(xyz1, xyz2)
-    dist2, idx2 = nm_dist(xyz2, xyz1)
-    dist1_ref, idx1_ref, dist2_ref, idx2_ref = closest_neighbour_sp(
-        xyz1.cpu().numpy(),
-        xyz2.cpu().numpy())
+    # dist1, idx1 = nm_dist(xyz1, xyz2)
+    # dist2, idx2 = nm_dist(xyz2, xyz1)
+    # dist1_ref, idx1_ref, dist2_ref, idx2_ref = closest_neighbour_sp(
+    #     xyz1.cpu().numpy(),
+    #     xyz2.cpu().numpy())
 
-    ic(np.isclose(dist1.cpu(), dist1_ref).sum() == len(xyz1))
-    ic(np.isclose(idx1.cpu(), idx1_ref).sum() == len(xyz1))
-    ic(np.isclose(dist2.cpu(), dist2_ref).sum() == len(xyz2))
-    ic(np.isclose(idx2.cpu(), idx2_ref).sum() == len(xyz2))
+    # ic(np.isclose(dist1.cpu(), dist1_ref).sum() == len(xyz1))
+    # ic(np.isclose(idx1.cpu(), idx1_ref).sum() == len(xyz1))
+    # ic(np.isclose(dist2.cpu(), dist2_ref).sum() == len(xyz2))
+    # ic(np.isclose(idx2.cpu(), idx2_ref).sum() == len(xyz2))
 
-    exit()
+    # exit()
 
     # num_pts = 50000
 
@@ -352,21 +365,21 @@ if __name__ == "__main__":
 
     # exit()
 
-    # num_pts = 400000
+    num_pts = 400000
 
-    # with profile(activities=[ProfilerActivity.CUDA],
-    #              record_shapes=True) as prof:
-    #     xyz1 = torch.randn(num_pts, 3).cuda()
-    #     xyz1.requires_grad_(True)
-    #     xyz2 = torch.randn(num_pts, 3).cuda()
+    with profile(activities=[ProfilerActivity.CUDA],
+                 record_shapes=True) as prof:
+        xyz1 = torch.randn(num_pts, 3).cuda()
+        xyz1.requires_grad_(True)
+        xyz2 = torch.randn(num_pts, 3).cuda()
 
-    #     with record_function("Triton"):
-    #         triton_out = nm_dist(xyz1, xyz2)
-    #         triton_out2 = nm_dist(xyz2, xyz1)
+        with record_function("Triton"):
+            triton_out = nm_dist(xyz1, xyz2)
+            triton_out2 = nm_dist(xyz2, xyz1)
 
-    # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
 
-    # exit()
+    exit()
 
     configs = []
     configs.append(
