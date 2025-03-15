@@ -4,7 +4,6 @@ from torch.profiler import profile, record_function, ProfilerActivity
 from scipy.spatial.distance import cdist
 from typing import List
 
-import mash_cpp
 import triton
 import triton.language as tl
 
@@ -23,6 +22,22 @@ def closest_neighbour_sp(ref_pts, query_pts):
 
 def get_cuda_autotune_config():
     return [
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 16,
+                'BLOCK_SIZE_M': 512,
+                'GROUP_SIZE': 1
+            },
+            num_warps=4,
+            num_stages=3),
+        triton.Config(
+            {
+                'BLOCK_SIZE_N': 16,
+                'BLOCK_SIZE_M': 512,
+                'GROUP_SIZE': 1
+            },
+            num_warps=2,
+            num_stages=3),
         triton.Config(
             {
                 'BLOCK_SIZE_N': 16,
@@ -127,7 +142,7 @@ def get_cuda_autotune_config():
 #     key=['M', 'N']
 #     )
 @triton.jit
-def nm_dist_kernel(xyz1_ptr, xyz2_ptr, dists_ptr, indices_ptr, lock_ptr, N, M,
+def nm_dist_kernel(xyz1_ptr, xyz2_ptr, lock_ptr, dists_ptr, indices_ptr, N, M,
                    xyz1_stride_n, xyz1_stride_d, xyz2_stride_m, xyz2_stride_d,
                    dist_stride_n, indices_stride_n, lock_stride_n,
                    BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_M: tl.constexpr,
@@ -187,6 +202,7 @@ def nm_dist_kernel(xyz1_ptr, xyz2_ptr, dists_ptr, indices_ptr, lock_ptr, N, M,
 
     cur_best_d = tl.load(dists_ptr + batch_base_n * dist_stride_n,
                          mask=batch_n_mask)
+    # FIXME: Handle zero initialization in JAX. There should be a better approach
     out_mask = (best_d < cur_best_d) & batch_n_mask
     tl.store(dists_ptr + batch_base_n * dist_stride_n, best_d, mask=out_mask)
     tl.store(indices_ptr + batch_base_n * indices_stride_n,
@@ -221,7 +237,7 @@ def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
         "num_stages": 3
     }
 
-    nm_dist_kernel[grid](xyz1, xyz2, dists, indices, lock, N, M,
+    nm_dist_kernel[grid](xyz1, xyz2, lock, dists, indices, N, M,
                          xyz1.stride(0), xyz1.stride(1), xyz2.stride(0),
                          xyz2.stride(1), dists.stride(0), indices.stride(0),
                          lock.stride(0), **configs)
@@ -280,48 +296,49 @@ def gradient(y, x, grad_outputs=None):
 
 
 if __name__ == "__main__":
+    # import mash_cpp
 
     torch.manual_seed(0)
 
-    xyz1 = torch.randn(868, 3).cuda()
-    xyz1.requires_grad_(True)
-    xyz2 = torch.randn(2976, 3).cuda()
-    xyz2.requires_grad_(True)
+    # xyz1 = torch.randn(868, 3).cuda()
+    # xyz1.requires_grad_(True)
+    # xyz2 = torch.randn(2976, 3).cuda()
+    # xyz2.requires_grad_(True)
 
-    dist1, idx1, dist2, idx2 = chamfer_distance(xyz1, xyz2)
-    dist1_mashcpp, dist2_mashcpp, idx1_mashcpp, idx2_mashcpp = mash_cpp.toChamferDistance(
-        xyz1[None, ...], xyz2[None, ...])
+    # dist1, idx1, dist2, idx2 = chamfer_distance(xyz1, xyz2)
+    # dist1_mashcpp, dist2_mashcpp, idx1_mashcpp, idx2_mashcpp = mash_cpp.toChamferDistance(
+    #     xyz1[None, ...], xyz2[None, ...])
 
-    def test_loss(d1: torch.Tensor, d2: torch.Tensor):
-        return d1.mean() - d2.sum()
+    # def test_loss(d1: torch.Tensor, d2: torch.Tensor):
+    #     return d1.mean() - d2.sum()
 
-    loss = test_loss(dist1, dist2)
-    loss_mashcpp = test_loss(dist1_mashcpp, dist2_mashcpp)
+    # loss = test_loss(dist1, dist2)
+    # loss_mashcpp = test_loss(dist1_mashcpp, dist2_mashcpp)
 
-    d_xyz1 = gradient(loss, xyz1)
-    d_xyz2 = gradient(loss, xyz2)
-    d_xyz1_mashcpp = gradient(loss_mashcpp, xyz1)
-    d_xyz2_mashcpp = gradient(loss_mashcpp, xyz2)
+    # d_xyz1 = gradient(loss, xyz1)
+    # d_xyz2 = gradient(loss, xyz2)
+    # d_xyz1_mashcpp = gradient(loss_mashcpp, xyz1)
+    # d_xyz2_mashcpp = gradient(loss_mashcpp, xyz2)
 
-    ic(torch.allclose(d_xyz1_mashcpp, d_xyz1))
-    ic(torch.allclose(d_xyz2_mashcpp, d_xyz2))
-    exit()
-
-    # xyz1 = torch.randn(17, 3).cuda()
-    # xyz2 = torch.randn(33, 3).cuda()
-
-    # dist1, idx1 = nm_dist(xyz1, xyz2)
-    # dist2, idx2 = nm_dist(xyz2, xyz1)
-    # dist1_ref, idx1_ref, dist2_ref, idx2_ref = closest_neighbour_sp(
-    #     xyz1.cpu().numpy(),
-    #     xyz2.cpu().numpy())
-
-    # ic(np.isclose(dist1.cpu(), dist1_ref).sum() == len(xyz1))
-    # ic(np.isclose(idx1.cpu(), idx1_ref).sum() == len(xyz1))
-    # ic(np.isclose(dist2.cpu(), dist2_ref).sum() == len(xyz2))
-    # ic(np.isclose(idx2.cpu(), idx2_ref).sum() == len(xyz2))
-
+    # ic(torch.allclose(d_xyz1_mashcpp, d_xyz1))
+    # ic(torch.allclose(d_xyz2_mashcpp, d_xyz2))
     # exit()
+
+    xyz1 = torch.randn(8192, 3).cuda()
+    xyz2 = torch.randn(8192, 3).cuda()
+
+    dist1, idx1 = nm_dist(xyz1, xyz2)
+    dist2, idx2 = nm_dist(xyz2, xyz1)
+    dist1_ref, idx1_ref, dist2_ref, idx2_ref = closest_neighbour_sp(
+        xyz1.cpu().numpy(),
+        xyz2.cpu().numpy())
+
+    ic(np.isclose(dist1.cpu(), dist1_ref).sum() == len(xyz1))
+    ic(np.isclose(idx1.cpu(), idx1_ref).sum() == len(xyz1))
+    ic(np.isclose(dist2.cpu(), dist2_ref).sum() == len(xyz2))
+    ic(np.isclose(idx2.cpu(), idx2_ref).sum() == len(xyz2))
+
+    exit()
 
     # num_pts = 50000
 
