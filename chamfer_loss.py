@@ -203,9 +203,7 @@ def nm_dist_kernel(xyz1_ptr, xyz2_ptr, lock_ptr, dists_ptr, indices_ptr, N, M,
     cur_best_d = tl.load(dists_ptr + batch_base_n * dist_stride_n,
                          mask=batch_n_mask)
     # Handle zero initialization in JAX
-    # Should be safe, as the initial values are not likely to be exactly zero
-    # It can be replaced by lock, but at the cost of additional control flow
-    # FIXME: Figure out a better approach
+    # FIXME: The safer option is to use another lock for first occuring pid_n initialization
     out_mask = ((best_d < cur_best_d) | (cur_best_d == 0)) & batch_n_mask
     tl.store(dists_ptr + batch_base_n * dist_stride_n, best_d, mask=out_mask)
     tl.store(indices_ptr + batch_base_n * indices_stride_n,
@@ -299,33 +297,33 @@ def gradient(y, x, grad_outputs=None):
 
 
 if __name__ == "__main__":
-    # import mash_cpp
+    import mash_cpp
 
     torch.manual_seed(0)
 
-    # xyz1 = torch.randn(868, 3).cuda()
-    # xyz1.requires_grad_(True)
-    # xyz2 = torch.randn(2976, 3).cuda()
-    # xyz2.requires_grad_(True)
+    xyz1 = torch.randn(868, 3).cuda()
+    xyz1.requires_grad_(True)
+    xyz2 = torch.randn(2976, 3).cuda()
+    xyz2.requires_grad_(True)
 
-    # dist1, idx1, dist2, idx2 = chamfer_distance(xyz1, xyz2)
-    # dist1_mashcpp, dist2_mashcpp, idx1_mashcpp, idx2_mashcpp = mash_cpp.toChamferDistance(
-    #     xyz1[None, ...], xyz2[None, ...])
+    dist1, idx1, dist2, idx2 = chamfer_distance(xyz1, xyz2)
+    dist1_mashcpp, dist2_mashcpp, idx1_mashcpp, idx2_mashcpp = mash_cpp.toChamferDistance(
+        xyz1[None, ...], xyz2[None, ...])
 
-    # def test_loss(d1: torch.Tensor, d2: torch.Tensor):
-    #     return d1.mean() - d2.sum()
+    def test_loss(d1: torch.Tensor, d2: torch.Tensor):
+        return d1.mean() - d2.sum()
 
-    # loss = test_loss(dist1, dist2)
-    # loss_mashcpp = test_loss(dist1_mashcpp, dist2_mashcpp)
+    loss = test_loss(dist1, dist2)
+    loss_mashcpp = test_loss(dist1_mashcpp, dist2_mashcpp)
 
-    # d_xyz1 = gradient(loss, xyz1)
-    # d_xyz2 = gradient(loss, xyz2)
-    # d_xyz1_mashcpp = gradient(loss_mashcpp, xyz1)
-    # d_xyz2_mashcpp = gradient(loss_mashcpp, xyz2)
+    d_xyz1 = gradient(loss, xyz1)
+    d_xyz2 = gradient(loss, xyz2)
+    d_xyz1_mashcpp = gradient(loss_mashcpp, xyz1)
+    d_xyz2_mashcpp = gradient(loss_mashcpp, xyz2)
 
-    # ic(torch.allclose(d_xyz1_mashcpp, d_xyz1))
-    # ic(torch.allclose(d_xyz2_mashcpp, d_xyz2))
-    # exit()
+    ic(torch.allclose(d_xyz1_mashcpp, d_xyz1))
+    ic(torch.allclose(d_xyz2_mashcpp, d_xyz2))
+    exit()
 
     # xyz1 = torch.randn(8192, 3).cuda()
     # xyz2 = torch.randn(8192, 3).cuda()
