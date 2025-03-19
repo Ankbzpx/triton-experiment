@@ -3,18 +3,16 @@
 #include <ATen/cuda/CUDAUtils.h>
 #include <c10/cuda/CUDAGuard.h>
 
-#include "knn_helper.cuh"
+#include "closest_query.cuh"
 #include <tiny-cuda-nn/encodings/grid.h>
 
 int main(int argc, char *argv[]) {
   torch::manual_seed(0);
-  torch::Tensor input = torch::randn({17, 3}, torch::kCUDA);
-  torch::Tensor query = torch::randn({33, 3}, torch::kCUDA);
   
-  std::cout << QueryClosest(input, query) << std::endl;
+  torch::Tensor xyz1 = torch::randn({17, 3}, torch::kCUDA);
+  torch::Tensor xyz2 = torch::randn({33, 3}, torch::kCUDA);
 
-  std::cout << input << std::endl;
-  std::cout << query << std::endl;
+  std::cout << QueryClosest(xyz2.contiguous(), xyz1.contiguous()) << std::endl;
 
   return 0;
 }

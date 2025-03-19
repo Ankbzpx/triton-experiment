@@ -27,11 +27,11 @@ set(HDR_DIR include)
 set(SRC_DIR src)
 
 set(HDRS
-    ${HDR_DIR}/knn_helper.cuh
+    ${HDR_DIR}/closest_query.cuh
 )
 
 set(SRCS
-    ${SRC_DIR}/knn_helper.cu
+    ${SRC_DIR}/closest_query.cu
     ${CMAKE_CURRENT_LIST_DIR}/main.cu
 )
 
