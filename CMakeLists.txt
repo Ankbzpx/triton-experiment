@@ -10,7 +10,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # For FetchContent
 list(PREPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+
 include(cudaKDTree)
+
 # As much I prefer FetchContent, it does not support recursive submmodules...
 set(TCNN_BUILD_BENCHMARK OFF)
 set(TCNN_BUILD_EXAMPLES OFF)
@@ -28,10 +30,12 @@ set(SRC_DIR src)
 
 set(HDRS
     ${HDR_DIR}/closest_query.cuh
+    ${HDR_DIR}/importance_sampling.cuh
 )
 
 set(SRCS
     ${SRC_DIR}/closest_query.cu
+    ${SRC_DIR}/importance_sampling.cu
     ${CMAKE_CURRENT_LIST_DIR}/main.cu
 )
 

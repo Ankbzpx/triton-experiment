@@ -9,18 +9,18 @@
 #include <cukd/builder.h>
 #include <cukd/fcp.h>
 
-template <typename point_t> struct OrderedPoint {
-  point_t position;
+template <typename PointT> struct OrderedPoint {
+  PointT position;
   int idx;
 };
 
-template <typename point_t>
-struct OrderedPoint_traits : public cukd::default_data_traits<point_t> {
-  using data_t = OrderedPoint<point_t>;
-  using point_traits = cukd::point_traits<point_t>;
+template <typename PointT>
+struct OrderedPoint_traits : public cukd::default_data_traits<PointT> {
+  using data_t = OrderedPoint<PointT>;
+  using point_traits = cukd::point_traits<PointT>;
   using scalar_t = typename point_traits::scalar_t;
 
-  static inline __device__ __host__ const point_t &
+  static inline __device__ __host__ const PointT &
   get_point(const data_t &data) {
     return data.position;
   }
@@ -44,9 +44,55 @@ __global__ void CopyKernel(OrderedPoint<PointT> *points, PointT *positions,
   points[tid].idx = tid;
 }
 
-using OrderedPoint3 = OrderedPoint<float3>;
-using OrderedPoint3_traits = OrderedPoint_traits<float3>;
+template <typename PointT>
+__global__ void
+ClosestPointKernel(int *d_indices, PointT *d_queries, int numQueries,
+                   const cukd::box_t<PointT> *d_bounds,
+                   OrderedPoint<PointT> *d_nodes, int numNodes) {
+  int tid = threadIdx.x + blockIdx.x * blockDim.x;
+  if (tid >= numQueries)
+    return;
+  PointT queryPos = d_queries[tid];
+  cukd::FcpSearchParams params;
+  int closestID =
+      cukd::cct::fcp<OrderedPoint<PointT>, OrderedPoint_traits<PointT>>(
+          queryPos, *d_bounds, d_nodes, numNodes, params);
+  d_indices[tid] = d_nodes[closestID].idx;
+}
 
+template <typename T, typename PointT, uint32_t BATCH_SIZE = 128>
 const torch::Tensor QueryClosest(const torch::Tensor &input,
-                                 const torch::Tensor &query);
+                                 const torch::Tensor &query) {
+  uint32_t numInput = input.size(0);
+  uint32_t numQueries = query.size(0);
+
+  // We must copy because implicit tree will re-arange input data
+  OrderedPoint<PointT> *d_input;
+  CUKD_CUDA_CHECK(cudaMallocManaged((void **)&d_input,
+                                    numInput * sizeof(OrderedPoint<PointT>)));
+
+  // **IMPORTANT** We cannot loop, as data is in device memory
+  CopyKernel<<<cukd::divRoundUp(numInput, BATCH_SIZE), BATCH_SIZE>>>(
+      d_input, reinterpret_cast<PointT *>(input.data_ptr<T>()), numInput);
+  CUKD_CUDA_SYNC_CHECK();
+  PointT *d_queries = reinterpret_cast<PointT *>(query.data_ptr<T>());
+
+  cukd::box_t<PointT> *d_bounds;
+  CUKD_CUDA_CHECK(
+      cudaMallocManaged((void **)&d_bounds, sizeof(cukd::box_t<PointT>)));
+  cukd::buildTree<OrderedPoint<PointT>, OrderedPoint_traits<PointT>>(
+      d_input, numInput, d_bounds);
+  CUKD_CUDA_SYNC_CHECK();
+
+  const torch::TensorOptions opts =
+      torch::TensorOptions().dtype(torch::kInt32).device(query.device());
+  torch::Tensor idxs = torch::zeros({numQueries}, opts);
+
+  ClosestPointKernel<<<cukd::divRoundUp(numQueries, BATCH_SIZE), BATCH_SIZE>>>(
+      idxs.data_ptr<int>(), d_queries, numQueries, d_bounds, d_input, numInput);
+  CUKD_CUDA_SYNC_CHECK();
+
+  return idxs;
+}
+
 #endif // KNN_HELPER_CUH
