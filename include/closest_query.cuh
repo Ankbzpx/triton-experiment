@@ -60,7 +60,8 @@ ClosestPointKernel(int *d_indices, PointT *d_queries, int numQueries,
   d_indices[tid] = d_nodes[closestID].idx;
 }
 
-template <typename T, typename PointT, uint32_t BATCH_SIZE = 128>
+template <typename T = float, typename PointT = float3,
+          uint32_t BATCH_SIZE = 128>
 const torch::Tensor QueryClosest(const torch::Tensor &input,
                                  const torch::Tensor &query) {
   uint32_t numInput = input.size(0);

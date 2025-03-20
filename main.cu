@@ -13,7 +13,7 @@ int main(int argc, char *argv[]) {
   torch::Tensor xyz1 = torch::randn({17, 3}, torch::kCUDA);
   torch::Tensor xyz2 = torch::randn({33, 3}, torch::kCUDA);
 
-  CurdeNN<float, 3>(xyz2, xyz1);
+  std::cout << CurdeNN(xyz2, xyz1) << std::endl;
 
   // std::cout << QueryClosest(xyz2.contiguous(), xyz1.contiguous()) <<
   // std::endl;
