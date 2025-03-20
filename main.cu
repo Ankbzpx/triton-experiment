@@ -13,10 +13,11 @@ int main(int argc, char *argv[]) {
   torch::Tensor xyz1 = torch::randn({17, 3}, torch::kCUDA);
   torch::Tensor xyz2 = torch::randn({33, 3}, torch::kCUDA);
 
-  std::cout << CurdeNN(xyz2, xyz1) << std::endl;
+  const at::cuda::CUDAGuard device_guard{xyz1.device()};
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  // std::cout << QueryClosest(xyz2.contiguous(), xyz1.contiguous()) <<
-  // std::endl;
+  std::cout << CurdeNN(stream, xyz2, xyz1) << std::endl;
+  std::cout << QueryClosest(stream, xyz2.contiguous(), xyz1.contiguous()) << std::endl;
 
   return 0;
 }

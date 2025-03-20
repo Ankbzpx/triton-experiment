@@ -110,14 +110,17 @@ __global__ void QueryDistanceKernel(
 template <typename T = float, uint32_t N_POS_DIMS = 3,
           tcnn::HashType HASH_TYPE = tcnn::HashType::CoherentPrime,
           uint32_t N_THREADS_HASHGRID = 512>
-torch::Tensor CurdeNN(const torch::Tensor &input, const torch::Tensor &query) {
+torch::Tensor CurdeNN(cudaStream_t stream, const torch::Tensor &input,
+                      const torch::Tensor &query) {
   uint32_t n_input = input.size(0);
 
   // TODO: Expose all configs
   uint32_t log2_hashmap_size = 19;
   uint32_t n_levels = 16;
-  uint32_t base_resolution = 2;
-  float per_level_scale = 1.5;
+  // We start at 1 so it is guaranteed nonzero
+  uint32_t base_resolution = 1;
+  // Golden ratio
+  float per_level_scale = 1.618;
 
   tcnn::GridOffsetTable offset_table;
 
@@ -169,7 +172,7 @@ torch::Tensor CurdeNN(const torch::Tensor &input, const torch::Tensor &query) {
       input.data_ptr<T>(), N_POS_DIMS, n_input);
 
   HashInputKernel<T, N_POS_DIMS, HASH_TYPE>
-      <<<blocks_hashgrid, N_THREADS_HASHGRID>>>(
+      <<<blocks_hashgrid, N_THREADS_HASHGRID, 0, stream>>>(
           n_input, offset_table, base_resolution, std::log2(per_level_scale),
           params.data_ptr<T>(), input_matrix.view());
 
@@ -186,7 +189,7 @@ torch::Tensor CurdeNN(const torch::Tensor &input, const torch::Tensor &query) {
                              n_levels, 1};
 
   QueryDistanceKernel<T, N_POS_DIMS, HASH_TYPE>
-      <<<blocks_query, N_THREADS_HASHGRID>>>(
+      <<<blocks_query, N_THREADS_HASHGRID, 0, stream>>>(
           n_query, n_levels, offset_table, base_resolution,
           std::log2(per_level_scale), params.data_ptr<T>(), query_matrix.view(),
           Da.data_ptr<T>());

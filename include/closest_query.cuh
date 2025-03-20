@@ -62,37 +62,38 @@ ClosestPointKernel(int *d_indices, PointT *d_queries, int numQueries,
 
 template <typename T = float, typename PointT = float3,
           uint32_t BATCH_SIZE = 128>
-const torch::Tensor QueryClosest(const torch::Tensor &input,
+const torch::Tensor QueryClosest(cudaStream_t stream,
+                                 const torch::Tensor &input,
                                  const torch::Tensor &query) {
   uint32_t numInput = input.size(0);
   uint32_t numQueries = query.size(0);
 
   // We must copy because implicit tree will re-arange input data
   OrderedPoint<PointT> *d_input;
-  CUKD_CUDA_CHECK(cudaMallocManaged((void **)&d_input,
-                                    numInput * sizeof(OrderedPoint<PointT>)));
+  CUKD_CUDA_CHECK(cudaMallocAsync(
+      (void **)&d_input, numInput * sizeof(OrderedPoint<PointT>), stream));
 
   // **IMPORTANT** We cannot loop, as data is in device memory
-  CopyKernel<<<cukd::divRoundUp(numInput, BATCH_SIZE), BATCH_SIZE>>>(
+  CopyKernel<<<cukd::divRoundUp(numInput, BATCH_SIZE), BATCH_SIZE, 0, stream>>>(
       d_input, reinterpret_cast<PointT *>(input.data_ptr<T>()), numInput);
   CUKD_CUDA_SYNC_CHECK();
   PointT *d_queries = reinterpret_cast<PointT *>(query.data_ptr<T>());
 
   cukd::box_t<PointT> *d_bounds;
   CUKD_CUDA_CHECK(
-      cudaMallocManaged((void **)&d_bounds, sizeof(cukd::box_t<PointT>)));
+      cudaMallocAsync((void **)&d_bounds, sizeof(cukd::box_t<PointT>), stream));
   cukd::buildTree<OrderedPoint<PointT>, OrderedPoint_traits<PointT>>(
-      d_input, numInput, d_bounds);
+      d_input, numInput, d_bounds, stream);
   CUKD_CUDA_SYNC_CHECK();
 
   const torch::TensorOptions opts =
       torch::TensorOptions().dtype(torch::kInt32).device(query.device());
   torch::Tensor idxs = torch::zeros({numQueries}, opts);
 
-  ClosestPointKernel<<<cukd::divRoundUp(numQueries, BATCH_SIZE), BATCH_SIZE>>>(
-      idxs.data_ptr<int>(), d_queries, numQueries, d_bounds, d_input, numInput);
+  ClosestPointKernel<<<cukd::divRoundUp(numQueries, BATCH_SIZE), BATCH_SIZE, 0,
+                       stream>>>(idxs.data_ptr<int>(), d_queries, numQueries,
+                                 d_bounds, d_input, numInput);
   CUKD_CUDA_SYNC_CHECK();
-
   return idxs;
 }
 
