@@ -1,5 +1,5 @@
-#ifndef IMPORTANCE_SAMPLING_CUH
-#define IMPORTANCE_SAMPLING_CUH
+#ifndef CRUDE_NN_CUH
+#define CRUDE_NN_CUH
 
 #include <c10/core/DeviceType.h>
 #include <cstdint>
@@ -110,7 +110,7 @@ __global__ void QueryDistanceKernel(
 template <typename T = float, uint32_t N_POS_DIMS = 3,
           tcnn::HashType HASH_TYPE = tcnn::HashType::CoherentPrime,
           uint32_t N_THREADS_HASHGRID = 512>
-torch::Tensor CurdeNN(cudaStream_t stream, const torch::Tensor &input,
+torch::Tensor CrudeNN(cudaStream_t stream, const torch::Tensor &input,
                       const torch::Tensor &query) {
   uint32_t n_input = input.size(0);
 
@@ -196,4 +196,4 @@ torch::Tensor CurdeNN(cudaStream_t stream, const torch::Tensor &input,
 
   return Da;
 }
-#endif // IMPORTANCE_SAMPLING_CUH
+#endif // CRUDE_NN_CUH

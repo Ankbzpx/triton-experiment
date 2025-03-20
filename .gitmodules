@@ -1,3 +1,6 @@
-[submodule "third_party/tiny-cuda-nn"]
-	path = third_party/tiny-cuda-nn
+[submodule "triton_chamfer/third_party/cudaKDTree"]
+	path = triton_chamfer/third_party/cudaKDTree
+	url = https://github.com/ingowald/cudaKDTree.git
+[submodule "triton_chamfer/third_party/tiny-cuda-nn"]
+	path = triton_chamfer/third_party/tiny-cuda-nn
 	url = https://github.com/NVlabs/tiny-cuda-nn.git

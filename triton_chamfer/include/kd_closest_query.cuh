@@ -1,7 +1,7 @@
 // Heavily copied from https://github.com/tilmantroester/cudakdtree_jax_binding
 
-#ifndef KNN_HELPER_CUH
-#define KNN_HELPER_CUH
+#ifndef KD_CLOSEST_QUERY_CUH
+#define KD_CLOSEST_QUERY_CUH
 
 #include <torch/extension.h>
 
@@ -62,7 +62,7 @@ ClosestPointKernel(int *d_indices, PointT *d_queries, int numQueries,
 
 template <typename T = float, typename PointT = float3,
           uint32_t BATCH_SIZE = 128>
-const torch::Tensor QueryClosest(cudaStream_t stream,
+const torch::Tensor KDQueryClosest(cudaStream_t stream,
                                  const torch::Tensor &input,
                                  const torch::Tensor &query) {
   uint32_t numInput = input.size(0);
@@ -97,4 +97,4 @@ const torch::Tensor QueryClosest(cudaStream_t stream,
   return idxs;
 }
 
-#endif // KNN_HELPER_CUH
+#endif // KD_CLOSEST_QUERY_CUH

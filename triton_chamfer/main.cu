@@ -4,8 +4,8 @@
 #include <iostream>
 #include <torch/extension.h>
 
-#include "closest_query.cuh"
-#include "importance_sampling.cuh"
+#include "crude_nn.cuh"
+#include "kd_closest_query.cuh"
 
 int main(int argc, char *argv[]) {
   torch::manual_seed(0);
@@ -16,8 +16,8 @@ int main(int argc, char *argv[]) {
   const at::cuda::CUDAGuard device_guard{xyz1.device()};
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  std::cout << CurdeNN(stream, xyz2, xyz1) << std::endl;
-  std::cout << QueryClosest(stream, xyz2.contiguous(), xyz1.contiguous()) << std::endl;
+  std::cout << CrudeNN(stream, xyz2, xyz1) << std::endl;
+  std::cout << KDQueryClosest(stream, xyz2.contiguous(), xyz1.contiguous()) << std::endl;
 
   return 0;
 }
