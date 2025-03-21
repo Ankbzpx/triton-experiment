@@ -44,10 +44,10 @@ __global__ void CopyKernel(OrderedPoint<PointT> *points, PointT *positions,
   points[tid].idx = tid;
 }
 
-template <typename PointT>
+template <typename T, typename PointT>
 __global__ void
-ClosestPointKernel(int *d_indices, PointT *d_queries, int numQueries,
-                   const cukd::box_t<PointT> *d_bounds,
+ClosestPointKernel(T *d_dists, int *d_indices, PointT *d_queries,
+                   int numQueries, const cukd::box_t<PointT> *d_bounds,
                    OrderedPoint<PointT> *d_nodes, int numNodes) {
   int tid = threadIdx.x + blockIdx.x * blockDim.x;
   if (tid >= numQueries)
@@ -57,14 +57,19 @@ ClosestPointKernel(int *d_indices, PointT *d_queries, int numQueries,
   int closestID =
       cukd::cct::fcp<OrderedPoint<PointT>, OrderedPoint_traits<PointT>>(
           queryPos, *d_bounds, d_nodes, numNodes, params);
-  d_indices[tid] = d_nodes[closestID].idx;
+  int idx = d_nodes[closestID].idx;
+  PointT inputPos = d_nodes[closestID].position;
+  d_dists[tid] = std::pow(queryPos.x - inputPos.x, 2) +
+                 std::pow(queryPos.y - inputPos.y, 2) +
+                 std::pow(queryPos.z - inputPos.z, 2);
+  d_indices[tid] = idx;
 }
 
 template <typename T = float, typename PointT = float3,
           uint32_t BATCH_SIZE = 128>
-const torch::Tensor KDQueryClosest(cudaStream_t stream,
-                                 const torch::Tensor &input,
-                                 const torch::Tensor &query) {
+std::vector<torch::Tensor> KDQueryClosest(cudaStream_t stream,
+                                          const torch::Tensor &input,
+                                          const torch::Tensor &query) {
   uint32_t numInput = input.size(0);
   uint32_t numQueries = query.size(0);
 
@@ -86,15 +91,20 @@ const torch::Tensor KDQueryClosest(cudaStream_t stream,
       d_input, numInput, d_bounds, stream);
   CUKD_CUDA_SYNC_CHECK();
 
-  const torch::TensorOptions opts =
+  const torch::TensorOptions distOpts =
+      torch::TensorOptions().dtype(query.dtype()).device(query.device());
+  torch::Tensor dists = torch::zeros({numQueries}, distOpts);
+
+  const torch::TensorOptions idxOpts =
       torch::TensorOptions().dtype(torch::kInt32).device(query.device());
-  torch::Tensor idxs = torch::zeros({numQueries}, opts);
+  torch::Tensor idxs = torch::zeros({numQueries}, idxOpts);
 
   ClosestPointKernel<<<cukd::divRoundUp(numQueries, BATCH_SIZE), BATCH_SIZE, 0,
-                       stream>>>(idxs.data_ptr<int>(), d_queries, numQueries,
-                                 d_bounds, d_input, numInput);
+                       stream>>>(dists.data_ptr<T>(), idxs.data_ptr<int>(),
+                                 d_queries, numQueries, d_bounds, d_input,
+                                 numInput);
   CUKD_CUDA_SYNC_CHECK();
-  return idxs;
+  return {dists, idxs};
 }
 
 #endif // KD_CLOSEST_QUERY_CUH

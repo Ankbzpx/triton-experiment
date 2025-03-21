@@ -26,7 +26,7 @@ PyObject *PyInit__C(void) {
 
 namespace triton_chamfer {
 
-torch::Tensor kd_closest_query_cuda(const torch::Tensor &xyz1,
+std::vector<torch::Tensor> kd_closest_query_cuda(const torch::Tensor &xyz1,
                                     const torch::Tensor &xyz2) {
   TORCH_CHECK(xyz1.size(1) == xyz2.size(1));
   TORCH_INTERNAL_ASSERT(xyz1.device().type() == at::DeviceType::CUDA);
@@ -49,7 +49,7 @@ torch::Tensor crude_nn_cuda(const torch::Tensor &xyz1,
 }
 
 TORCH_LIBRARY(triton_chamfer, m) {
-  m.def("kd_closest_query(Tensor a, Tensor b) -> Tensor");
+  m.def("kd_closest_query(Tensor a, Tensor b) -> Tensor[]");
   m.def("crude_nn(Tensor a, Tensor b) -> Tensor");
 }
 
