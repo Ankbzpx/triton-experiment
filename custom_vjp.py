@@ -164,7 +164,7 @@ if __name__ == "__main__":
     xyz2_torch.requires_grad_(True)
 
     # dist1, idx1, dist2, idx2 = chamfer_distance_jax(xyz1, xyz2)
-    # dist1_ref, idx1_ref, dist2_ref, idx2_ref = closest_neighbour_sp(xyz1, xyz2)
+    # dist1_ref, idx1_ref, dist2_ref, idx2_ref = chamfer_distance_sp(xyz1, xyz2)
 
     # ic(np.isclose(dist1, dist1_ref).sum() == len(xyz1))
     # ic(np.isclose(idx1, idx1_ref).sum() == len(xyz1))

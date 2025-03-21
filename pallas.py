@@ -8,7 +8,7 @@ from jax.experimental import pallas as pl
 from icecream import ic
 
 
-def closest_neighbour_sp(ref_pts, query_pts):
+def chamfer_distance_sp(ref_pts, query_pts):
     dist_mat = cdist(ref_pts, query_pts, metric='sqeuclidean')
     ref_closest_index_sp = np.argmin(dist_mat, axis=1)
     ref_closest_dist_sp = np.min(dist_mat, axis=1)

@@ -6,11 +6,12 @@ from typing import List
 
 import triton
 import triton.language as tl
+import triton_chamfer
 
 from icecream import ic
 
 
-def closest_neighbour_sp(ref_pts, query_pts):
+def chamfer_distance_sp(ref_pts, query_pts):
     dist_mat = cdist(ref_pts, query_pts, metric='sqeuclidean')
     ref_closest_index_sp = np.argmin(dist_mat, axis=1)
     ref_closest_dist_sp = np.min(dist_mat, axis=1)
@@ -287,6 +288,18 @@ chamfer_distance.register_autograd(
     chamfer_distance_backward, setup_context=chamfer_distance_setup_context)
 
 
+@torch.library.custom_op("mash::chamfer_distance_kd", mutates_args=())
+def chamfer_distance_kd(xyz1: torch.Tensor,
+                        xyz2: torch.Tensor) -> List[torch.Tensor]:
+    dist1, idx1 = triton_chamfer.ops.kd_closest_query(xyz1, xyz2)
+    dist2, idx2 = triton_chamfer.ops.kd_closest_query(xyz2, xyz1)
+    return dist1, idx1, dist2, idx2
+
+
+chamfer_distance_kd.register_autograd(
+    chamfer_distance_backward, setup_context=chamfer_distance_setup_context)
+
+
 def gradient(y, x, grad_outputs=None):
     if grad_outputs is None:
         grad_outputs = torch.ones_like(y)
@@ -306,7 +319,7 @@ if __name__ == "__main__":
     xyz2 = torch.randn(2976, 3).cuda()
     xyz2.requires_grad_(True)
 
-    dist1, idx1, dist2, idx2 = chamfer_distance(xyz1, xyz2)
+    dist1, idx1, dist2, idx2 = chamfer_distance_kd(xyz1, xyz2)
     dist1_mashcpp, dist2_mashcpp, idx1_mashcpp, idx2_mashcpp = mash_cpp.toChamferDistance(
         xyz1[None, ...], xyz2[None, ...])
 
@@ -328,9 +341,8 @@ if __name__ == "__main__":
     # xyz1 = torch.randn(8192, 3).cuda()
     # xyz2 = torch.randn(8192, 3).cuda()
 
-    # dist1, idx1 = nm_dist(xyz1, xyz2)
-    # dist2, idx2 = nm_dist(xyz2, xyz1)
-    # dist1_ref, idx1_ref, dist2_ref, idx2_ref = closest_neighbour_sp(
+    # dist1, idx1, dist2, idx2 = chamfer_distance_kd(xyz1, xyz2)
+    # dist1_ref, idx1_ref, dist2_ref, idx2_ref = chamfer_distance_sp(
     #     xyz1.cpu().numpy(),
     #     xyz2.cpu().numpy())
 
@@ -353,21 +365,21 @@ if __name__ == "__main__":
 
     # exit()
 
-    num_pts = 400000
+    # num_pts = 400000
 
-    with profile(activities=[ProfilerActivity.CUDA],
-                 record_shapes=True) as prof:
-        xyz1 = torch.randn(num_pts, 3).cuda()
-        xyz1.requires_grad_(True)
-        xyz2 = torch.randn(num_pts, 3).cuda()
+    # with profile(activities=[ProfilerActivity.CUDA],
+    #              record_shapes=True) as prof:
+    #     xyz1 = torch.randn(num_pts, 3).cuda()
+    #     xyz1.requires_grad_(True)
+    #     xyz2 = torch.randn(num_pts, 3).cuda()
 
-        with record_function("Triton"):
-            triton_out = nm_dist(xyz1, xyz2)
-            triton_out2 = nm_dist(xyz2, xyz1)
+    #     with record_function("Triton"):
+    #         triton_out = chamfer_distance(xyz1, xyz2)
 
-    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+    #     with record_function("KD"):
+    #         kd_out = chamfer_distance_kd(xyz1, xyz2)
 
-    exit()
+    # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
 
     configs = []
     configs.append(
@@ -375,8 +387,8 @@ if __name__ == "__main__":
             x_names=["N", "M"],
             x_vals=[4 * np.power(10, i) for i in range(1, 6)],
             line_arg="provider",
-            line_vals=["Triton", "MashCPP"],
-            line_names=["Triton", "MashCPP"],
+            line_vals=["Triton", "KD"],
+            line_names=["Triton", "KD"],
             styles=[("green", "-"), ("blue", "-")],
             ylabel="TFLOPS",
             plot_name="NMDist Performance",
@@ -387,11 +399,9 @@ if __name__ == "__main__":
         xyz1 = torch.randn(M, 3).cuda()
         xyz2 = torch.randn(N, 3).cuda()
         quantiles = [0.5, 0.2, 0.8]
-        if provider == "MashCPP":
+        if provider == "KD":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: mash_cpp.toChamferDistance(xyz1[None, ...], xyz2[None,
-                                                                         ...]),
-                quantiles=quantiles)
+                lambda: chamfer_distance_kd(xyz1, xyz2), quantiles=quantiles)
         if provider == "Triton":
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: chamfer_distance(xyz1, xyz2), quantiles=quantiles)

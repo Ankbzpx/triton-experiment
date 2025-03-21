@@ -116,7 +116,7 @@ torch::Tensor CrudeNN(cudaStream_t stream, const torch::Tensor &input,
 
   // TODO: Expose all configs
   uint32_t log2_hashmap_size = 19;
-  uint32_t n_levels = 16;
+  uint32_t n_levels = 8;
   // We start at 1 so it is guaranteed nonzero
   uint32_t base_resolution = 1;
   // Golden ratio
@@ -176,17 +176,13 @@ torch::Tensor CrudeNN(cudaStream_t stream, const torch::Tensor &input,
           n_input, offset_table, base_resolution, std::log2(per_level_scale),
           params.data_ptr<T>(), input_matrix.view());
 
-  // std::cout << "Here" << std::endl;
-  // std::cout << n_params << std::endl;
-  // std::cout << params.index({params != INFINITY}) << std::endl;
-
   uint32_t n_query = query.size(0);
   tcnn::GPUMatrix<T, tcnn::MatrixLayout::ColumnMajor> query_matrix(
       query.data_ptr<T>(), N_POS_DIMS, n_query);
   torch::Tensor Da = torch::zeros({n_query}, opts);
 
-  const dim3 blocks_query = {tcnn::div_round_up(n_query, N_THREADS_HASHGRID),
-                             n_levels, 1};
+  const dim3 blocks_query = {tcnn::div_round_up(n_query, N_THREADS_HASHGRID), 1,
+                             1};
 
   QueryDistanceKernel<T, N_POS_DIMS, HASH_TYPE>
       <<<blocks_query, N_THREADS_HASHGRID, 0, stream>>>(
