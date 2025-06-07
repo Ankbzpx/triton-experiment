@@ -117,10 +117,10 @@ def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
                          triton.cdiv(M, META['BLOCK_SIZE_M']))
 
     configs = {
-        'BLOCK_SIZE_B': 16,
+        'BLOCK_SIZE_B': 32,
         'BLOCK_SIZE_N': 16,
-        'BLOCK_SIZE_M': 512,
-        'GROUP_SIZE': 16,
+        'BLOCK_SIZE_M': 16,
+        'GROUP_SIZE': 4,
         "num_warps": 2,
         "num_stages": 3
     }
