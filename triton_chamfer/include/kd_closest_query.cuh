@@ -36,9 +36,11 @@ struct OrderedPoint_traits : public cukd::default_data_traits<PointT> {
 
 template <typename PointT>
 __global__ void CopyKernel(OrderedPoint<PointT> *points, PointT *positions,
-                           int n_points) {
-  int tid = threadIdx.x + blockIdx.x * blockDim.x;
-  if (tid >= n_points)
+                           int n_batches, int n_points) {
+  int bid = threadIdx.x + blockIdx.x * blockDim.x;
+  int nid = threadIdx.y + blockIdx.y * blockDim.y;
+  int tid = bid + nid * (gridDim.x * blockDim.x);
+  if (tid >= (n_batches * n_points))
     return;
   points[tid].position = positions[tid];
   points[tid].idx = tid;
@@ -46,17 +48,20 @@ __global__ void CopyKernel(OrderedPoint<PointT> *points, PointT *positions,
 
 template <typename T, typename PointT>
 __global__ void
-ClosestPointKernel(T *d_dists, int *d_indices, PointT *d_queries,
-                   int numQueries, const cukd::box_t<PointT> *d_bounds,
-                   OrderedPoint<PointT> *d_nodes, int numNodes) {
-  int tid = threadIdx.x + blockIdx.x * blockDim.x;
-  if (tid >= numQueries)
+ClosestPointKernel(T *d_dists, int *d_indices, PointT *d_queries, int n_batches,
+                   int n_queries, const cukd::box_t<PointT> *d_bounds,
+                   OrderedPoint<PointT> *d_nodes, int num_nodes) {
+  int bid = threadIdx.x + blockIdx.x * blockDim.x;
+  int nid = threadIdx.y + blockIdx.y * blockDim.y;
+  int tid = bid + nid * (gridDim.x * blockDim.x);
+  if (tid >= (n_batches * n_queries))
     return;
   PointT queryPos = d_queries[tid];
   cukd::FcpSearchParams params;
   int closestID =
       cukd::cct::fcp<OrderedPoint<PointT>, OrderedPoint_traits<PointT>>(
-          queryPos, *d_bounds, d_nodes, numNodes, params);
+          queryPos, *(d_bounds + bid), d_nodes + bid * num_nodes, num_nodes,
+          params);
   int idx = d_nodes[closestID].idx;
   PointT inputPos = d_nodes[closestID].position;
   d_dists[tid] = std::pow(queryPos.x - inputPos.x, 2) +
@@ -66,43 +71,53 @@ ClosestPointKernel(T *d_dists, int *d_indices, PointT *d_queries,
 }
 
 template <typename T = float, typename PointT = float3,
-          uint32_t BATCH_SIZE = 128>
+          uint32_t BATCH_SIZE_B = 32, uint32_t BATCH_SIZE_N = 16,
+          uint32_t BATCH_SIZE_M = 16>
 std::vector<torch::Tensor> KDQueryClosest(cudaStream_t stream,
                                           const torch::Tensor &input,
                                           const torch::Tensor &query) {
-  uint32_t numInput = input.size(0);
-  uint32_t numQueries = query.size(0);
+  uint32_t numBatches = input.size(0);
+  uint32_t numInput = input.size(1);
+  uint32_t numQueries = query.size(1);
 
   // We must copy because implicit tree will re-arange input data
   OrderedPoint<PointT> *d_input;
   CUKD_CUDA_CHECK(cudaMallocAsync(
-      (void **)&d_input, numInput * sizeof(OrderedPoint<PointT>), stream));
+      (void **)&d_input, numBatches * numInput * sizeof(OrderedPoint<PointT>),
+      stream));
 
   // **IMPORTANT** We cannot loop, as data is in device memory
-  CopyKernel<<<cukd::divRoundUp(numInput, BATCH_SIZE), BATCH_SIZE, 0, stream>>>(
-      d_input, reinterpret_cast<PointT *>(input.data_ptr<T>()), numInput);
+  CopyKernel<<<dim3(cukd::divRoundUp(numBatches, BATCH_SIZE_B),
+                    cukd::divRoundUp(numInput, BATCH_SIZE_N)),
+               dim3(BATCH_SIZE_B, BATCH_SIZE_N), 0, stream>>>(
+      d_input, reinterpret_cast<PointT *>(input.data_ptr<T>()), numBatches,
+      numInput);
   CUKD_CUDA_SYNC_CHECK();
   PointT *d_queries = reinterpret_cast<PointT *>(query.data_ptr<T>());
 
   cukd::box_t<PointT> *d_bounds;
-  CUKD_CUDA_CHECK(
-      cudaMallocAsync((void **)&d_bounds, sizeof(cukd::box_t<PointT>), stream));
-  cukd::buildTree<OrderedPoint<PointT>, OrderedPoint_traits<PointT>>(
-      d_input, numInput, d_bounds, stream);
+  CUKD_CUDA_CHECK(cudaMallocAsync(
+      (void **)&d_bounds, numBatches * sizeof(cukd::box_t<PointT>), stream));
+
+  for (int bid = 0; bid < numBatches; bid++) {
+    cukd::buildTree<OrderedPoint<PointT>, OrderedPoint_traits<PointT>>(
+        d_input + bid * numInput, numInput, d_bounds + bid, stream);
+  }
   CUKD_CUDA_SYNC_CHECK();
 
   const torch::TensorOptions distOpts =
       torch::TensorOptions().dtype(query.dtype()).device(query.device());
-  torch::Tensor dists = torch::zeros({numQueries}, distOpts);
+  torch::Tensor dists = torch::zeros({numBatches, numQueries}, distOpts);
 
   const torch::TensorOptions idxOpts =
       torch::TensorOptions().dtype(torch::kInt32).device(query.device());
-  torch::Tensor idxs = torch::zeros({numQueries}, idxOpts);
+  torch::Tensor idxs = torch::zeros({numBatches, numQueries}, idxOpts);
 
-  ClosestPointKernel<<<cukd::divRoundUp(numQueries, BATCH_SIZE), BATCH_SIZE, 0,
-                       stream>>>(dists.data_ptr<T>(), idxs.data_ptr<int>(),
-                                 d_queries, numQueries, d_bounds, d_input,
-                                 numInput);
+  ClosestPointKernel<<<dim3(cukd::divRoundUp(numBatches, BATCH_SIZE_B),
+                            cukd::divRoundUp(numQueries, BATCH_SIZE_M)),
+                       dim3(BATCH_SIZE_B, BATCH_SIZE_M), 0, stream>>>(
+      dists.data_ptr<T>(), idxs.data_ptr<int>(), d_queries, numBatches,
+      numQueries, d_bounds, d_input, numInput);
   CUKD_CUDA_SYNC_CHECK();
   return {dists, idxs};
 }

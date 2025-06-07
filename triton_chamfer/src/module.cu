@@ -28,7 +28,7 @@ namespace triton_chamfer {
 
 std::vector<torch::Tensor> kd_closest_query_cuda(const torch::Tensor &xyz1,
                                     const torch::Tensor &xyz2) {
-  TORCH_CHECK(xyz1.size(1) == xyz2.size(1));
+  TORCH_CHECK(xyz1.size(-1) == xyz2.size(-1));
   TORCH_INTERNAL_ASSERT(xyz1.device().type() == at::DeviceType::CUDA);
   TORCH_INTERNAL_ASSERT(xyz2.device().type() == at::DeviceType::CUDA);
 
