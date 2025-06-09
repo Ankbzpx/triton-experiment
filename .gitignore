@@ -1,5 +1,6 @@
 __pycache__
 *.ncu-rep
+*.nsys-rep
 .cache
 build
 .vscode
