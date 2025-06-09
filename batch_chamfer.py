@@ -11,13 +11,30 @@ from icecream import ic
 
 
 @triton.jit
-def nm_dist_kernel(xyz1_ptr, xyz2_ptr, dists_ptr, indices_ptr, B, N, M,
-                   xyz1_stride_b, xyz1_stride_n, xyz1_stride_d, xyz2_stride_b,
-                   xyz2_stride_m, xyz2_stride_d, dist_stride_b, dist_stride_n,
-                   indices_stride_b, indices_stride_n,
-                   BLOCK_SIZE_B: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
-                   BLOCK_SIZE_M: tl.constexpr):
-
+def nm_dist_kernel(
+    xyz1_x_ptr,
+    xyz1_y_ptr,
+    xyz1_z_ptr,
+    xyz2_x_ptr,
+    xyz2_y_ptr,
+    xyz2_z_ptr,
+    dists_ptr,
+    indices_ptr,
+    B,
+    N,
+    M,
+    xyz1_stride_b,
+    xyz1_stride_n,
+    xyz2_stride_b,
+    xyz2_stride_m,
+    dist_stride_b,
+    dist_stride_n,
+    indices_stride_b,
+    indices_stride_n,
+    BLOCK_SIZE_B: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+):
     pid_b = tl.program_id(axis=0)
     pid_n = tl.program_id(axis=1)
 
@@ -29,40 +46,55 @@ def nm_dist_kernel(xyz1_ptr, xyz2_ptr, dists_ptr, indices_ptr, B, N, M,
 
     batch_n_mask = (batch_base_b[:, None] < B) & (batch_base_n[None, :] < N)
 
-    xyz1_x = tl.load(xyz1_ptr + batch_base_b[:, None] * xyz1_stride_b +
-                     batch_base_n[None, :] * xyz1_stride_n,
-                     mask=batch_n_mask,
-                     other=100)
-    xyz1_y = tl.load(xyz1_ptr + batch_base_b[:, None] * xyz1_stride_b +
-                     batch_base_n[None, :] * xyz1_stride_n + xyz1_stride_d,
-                     mask=batch_n_mask,
-                     other=100)
-    xyz1_z = tl.load(xyz1_ptr + batch_base_b[:, None] * xyz1_stride_b +
-                     batch_base_n[None, :] * xyz1_stride_n + 2 * xyz1_stride_d,
-                     mask=batch_n_mask,
-                     other=100)
+    xyz1_x = tl.load(
+        xyz1_x_ptr
+        + batch_base_b[:, None] * xyz1_stride_b
+        + batch_base_n[None, :] * xyz1_stride_n,
+        mask=batch_n_mask,
+        other=100,
+    )
+    xyz1_y = tl.load(
+        xyz1_y_ptr
+        + batch_base_b[:, None] * xyz1_stride_b
+        + batch_base_n[None, :] * xyz1_stride_n,
+        mask=batch_n_mask,
+        other=100,
+    )
+    xyz1_z = tl.load(
+        xyz1_z_ptr
+        + batch_base_b[:, None] * xyz1_stride_b
+        + batch_base_n[None, :] * xyz1_stride_n,
+        mask=batch_n_mask,
+        other=100,
+    )
 
-    cur_best_d = tl.full((BLOCK_SIZE_B, BLOCK_SIZE_N), float('inf'),
-                         tl.float32)
+    cur_best_d = tl.full((BLOCK_SIZE_B, BLOCK_SIZE_N), float("inf"), tl.float32)
     cur_best_idx = tl.zeros((BLOCK_SIZE_B, BLOCK_SIZE_N), tl.int32)
 
     for base_m in tl.range(0, M, BLOCK_SIZE_M):
         batch_base_m = base_m + tl.arange(0, BLOCK_SIZE_M)
-        batch_m_mask = (batch_base_b[:, None] < B) & (batch_base_m[None, :]
-                                                      < M)
-        xyz2_x = tl.load(xyz2_ptr + batch_base_b[:, None] * xyz2_stride_b +
-                         batch_base_m[None, :] * xyz2_stride_m,
-                         mask=batch_m_mask,
-                         other=-100)
-        xyz2_y = tl.load(xyz2_ptr + batch_base_b[:, None] * xyz2_stride_b +
-                         batch_base_m[None, :] * xyz2_stride_m + xyz2_stride_d,
-                         mask=batch_m_mask,
-                         other=-100)
-        xyz2_z = tl.load(xyz2_ptr + batch_base_b[:, None] * xyz2_stride_b +
-                         batch_base_m[None, :] * xyz2_stride_m +
-                         2 * xyz2_stride_d,
-                         mask=batch_m_mask,
-                         other=-100)
+        batch_m_mask = (batch_base_b[:, None] < B) & (batch_base_m[None, :] < M)
+        xyz2_x = tl.load(
+            xyz2_x_ptr
+            + batch_base_b[:, None] * xyz2_stride_b
+            + batch_base_m[None, :] * xyz2_stride_m,
+            mask=batch_m_mask,
+            other=-100,
+        )
+        xyz2_y = tl.load(
+            xyz2_y_ptr
+            + batch_base_b[:, None] * xyz2_stride_b
+            + batch_base_m[None, :] * xyz2_stride_m,
+            mask=batch_m_mask,
+            other=-100,
+        )
+        xyz2_z = tl.load(
+            xyz2_z_ptr
+            + batch_base_b[:, None] * xyz2_stride_b
+            + batch_base_m[None, :] * xyz2_stride_m,
+            mask=batch_m_mask,
+            other=-100,
+        )
 
         x2 = xyz1_x[:, :, None] - xyz2_x[:, None, :]
         y2 = xyz1_y[:, :, None] - xyz2_y[:, None, :]
@@ -79,43 +111,72 @@ def nm_dist_kernel(xyz1_ptr, xyz2_ptr, dists_ptr, indices_ptr, B, N, M,
         cur_best_d = tl.where(mask, best_d, cur_best_d)
         cur_best_idx = tl.where(mask, best_idx, cur_best_idx)
 
-    tl.store(dists_ptr + batch_base_b[:, None] * dist_stride_b +
-             batch_base_n[None, :] * dist_stride_n,
-             cur_best_d,
-             mask=batch_n_mask)
-    tl.store(indices_ptr + batch_base_b[:, None] * indices_stride_b +
-             batch_base_n[None, :] * indices_stride_n,
-             cur_best_idx,
-             mask=batch_n_mask)
+    tl.store(
+        dists_ptr
+        + batch_base_b[:, None] * dist_stride_b
+        + batch_base_n[None, :] * dist_stride_n,
+        cur_best_d,
+        mask=batch_n_mask,
+    )
+    tl.store(
+        indices_ptr
+        + batch_base_b[:, None] * indices_stride_b
+        + batch_base_n[None, :] * indices_stride_n,
+        cur_best_idx,
+        mask=batch_n_mask,
+    )
 
 
 def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
-    assert xyz1.shape[-1] == xyz2.shape[-1], "Incompatible dimensions"
-    assert xyz1.is_contiguous(), "Matrix xyz1 must be contiguous"
-    assert xyz2.is_contiguous(), "Matrix xyz2 must be contiguous"
+    xyz1_x = xyz1[..., 0].contiguous()
+    xyz1_y = xyz1[..., 1].contiguous()
+    xyz1_z = xyz1[..., 2].contiguous()
 
-    B, N, D = xyz1.shape
-    B, M, D = xyz2.shape
+    xyz2_x = xyz2[..., 0].contiguous()
+    xyz2_y = xyz2[..., 1].contiguous()
+    xyz2_z = xyz2[..., 2].contiguous()
+
+    B, N = xyz1_x.shape
+    B, M = xyz2_x.shape
 
     dists = torch.zeros((B, N), device=xyz1.device, dtype=xyz1.dtype)
     indices = torch.zeros((B, N), device=xyz1.device, dtype=torch.int32)
 
-    grid = lambda META: (triton.cdiv(B, META['BLOCK_SIZE_B']),
-                         triton.cdiv(N, META['BLOCK_SIZE_N']))
+    grid = lambda META: (
+        triton.cdiv(B, META["BLOCK_SIZE_B"]),
+        triton.cdiv(N, META["BLOCK_SIZE_N"]),
+    )
 
     configs = {
-        'BLOCK_SIZE_B': 1,
-        'BLOCK_SIZE_N': 16,
-        'BLOCK_SIZE_M': 512,
+        "BLOCK_SIZE_B": 1,
+        "BLOCK_SIZE_N": 16,
+        "BLOCK_SIZE_M": 512,
         "num_warps": 2,
-        "num_stages": 3
+        "num_stages": 3,
     }
 
-    nm_dist_kernel[grid](xyz1, xyz2, dists, indices, B, N, M, xyz1.stride(0),
-                         xyz1.stride(1), xyz1.stride(2), xyz2.stride(0),
-                         xyz2.stride(1), xyz2.stride(2), dists.stride(0),
-                         dists.stride(1), indices.stride(0), indices.stride(1),
-                         **configs)
+    nm_dist_kernel[grid](
+        xyz1_x,
+        xyz1_y,
+        xyz1_z,
+        xyz2_x,
+        xyz2_y,
+        xyz2_z,
+        dists,
+        indices,
+        B,
+        N,
+        M,
+        xyz1_x.stride(0),
+        xyz1_x.stride(1),
+        xyz2_x.stride(0),
+        xyz2_x.stride(1),
+        dists.stride(0),
+        dists.stride(1),
+        indices.stride(0),
+        indices.stride(1),
+        **configs,
+    )
     return dists, indices
 
 
@@ -130,11 +191,12 @@ if __name__ == "__main__":
 
     torch.manual_seed(0)
 
-    xyz1 = torch.randn(2, 17, 3).cuda()
-    xyz2 = torch.randn(2, 33, 3).cuda()
+    xyz1 = torch.randn(10000, 1024, 3).cuda()
+    xyz2 = torch.randn(10000, 1536, 3).cuda()
 
-    dist1_mashcpp, dist2_mashcpp, idx1_mashcpp, idx2_mashcpp = mash_cpp.toChamferDistance(
-        xyz1, xyz2)
+    dist1_mashcpp, dist2_mashcpp, idx1_mashcpp, idx2_mashcpp = (
+        mash_cpp.toChamferDistance(xyz1, xyz2)
+    )
 
     dist1, idx1 = nm_dist(xyz1, xyz2)
     dist2, idx2 = nm_dist(xyz2, xyz1)
@@ -146,28 +208,32 @@ if __name__ == "__main__":
 
     configs = []
     configs.append(
-        triton.testing.Benchmark(x_names=["B", "N", "M"],
-                                 x_vals=np.arange(5) * 1000,
-                                 line_arg="provider",
-                                 line_vals=["Triton", "MASH"],
-                                 line_names=["Triton", "MASH"],
-                                 styles=[("green", "-"), ("blue", "-")],
-                                 ylabel="TFLOPS",
-                                 plot_name="NMDist Performance",
-                                 args={}))
+        triton.testing.Benchmark(
+            x_names=["B", "N", "M"],
+            x_vals=np.arange(10) * 1000,
+            line_arg="provider",
+            line_vals=["Triton", "MASH"],
+            line_names=["Triton", "MASH"],
+            styles=[("green", "-"), ("blue", "-")],
+            ylabel="TFLOPS",
+            plot_name="NMDist Performance",
+            args={},
+        )
+    )
 
     @triton.testing.perf_report(configs)
     def benchmark(B, M, N, provider):
-        xyz1 = torch.randn(B, 1600, 3).cuda()
-        xyz2 = torch.randn(B, 1000, 3).cuda()
+        xyz1 = torch.randn(B, 1536, 3).cuda()
+        xyz2 = torch.randn(B, 1024, 3).cuda()
         quantiles = [0.5, 0.2, 0.8]
         if provider == "MASH":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: mash_cpp.toChamferDistance(xyz1, xyz2),
-                quantiles=quantiles)
+                lambda: mash_cpp.toChamferDistance(xyz1, xyz2), quantiles=quantiles
+            )
         if provider == "Triton":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: chamfer_distance(xyz1, xyz2), quantiles=quantiles)
+                lambda: chamfer_distance(xyz1, xyz2), quantiles=quantiles
+            )
         perf = lambda ms: 2 * M * N * 1e-12 / (ms * 1e-3)
         return perf(ms), perf(max_ms), perf(min_ms)
 
