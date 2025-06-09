@@ -39,35 +39,44 @@ __global__ void CopyKernel(OrderedPoint<PointT> *points, PointT *positions,
                            int n_batches, int n_points) {
   int bid = threadIdx.x + blockIdx.x * blockDim.x;
   int nid = threadIdx.y + blockIdx.y * blockDim.y;
-  int tid = bid + nid * (gridDim.x * blockDim.x);
-  if (tid >= (n_batches * n_points))
+
+  if ((bid >= n_batches) || (nid >= n_points))
     return;
-  points[tid].position = positions[tid];
-  points[tid].idx = tid;
+
+  // Row major
+  int pid = bid * n_points + nid;
+  points[pid].position = positions[pid];
+  // Batch local index
+  points[pid].idx = nid;
 }
 
 template <typename T, typename PointT>
 __global__ void
 ClosestPointKernel(T *d_dists, int *d_indices, PointT *d_queries, int n_batches,
                    int n_queries, const cukd::box_t<PointT> *d_bounds,
-                   OrderedPoint<PointT> *d_nodes, int num_nodes) {
+                   OrderedPoint<PointT> *d_nodes, int n_points) {
   int bid = threadIdx.x + blockIdx.x * blockDim.x;
-  int nid = threadIdx.y + blockIdx.y * blockDim.y;
-  int tid = bid + nid * (gridDim.x * blockDim.x);
-  if (tid >= (n_batches * n_queries))
+  int mid = threadIdx.y + blockIdx.y * blockDim.y;
+
+  if ((bid >= n_batches) || (mid >= n_queries))
     return;
-  PointT queryPos = d_queries[tid];
+
+  // Row major
+  int qid = bid * n_queries + mid;
+  PointT queryPos = d_queries[qid];
   cukd::FcpSearchParams params;
+  // Local closest index
   int closestID =
       cukd::cct::fcp<OrderedPoint<PointT>, OrderedPoint_traits<PointT>>(
-          queryPos, *(d_bounds + bid), d_nodes + bid * num_nodes, num_nodes,
+          queryPos, *(d_bounds + bid), d_nodes + bid * n_points, n_points,
           params);
-  int idx = d_nodes[closestID].idx;
-  PointT inputPos = d_nodes[closestID].position;
-  d_dists[tid] = std::pow(queryPos.x - inputPos.x, 2) +
+  int pid = bid * n_points + closestID;
+  int idx = d_nodes[pid].idx;
+  PointT inputPos = d_nodes[pid].position;
+  d_dists[qid] = std::pow(queryPos.x - inputPos.x, 2) +
                  std::pow(queryPos.y - inputPos.y, 2) +
                  std::pow(queryPos.z - inputPos.z, 2);
-  d_indices[tid] = idx;
+  d_indices[qid] = idx;
 }
 
 template <typename T = float, typename PointT = float3,
