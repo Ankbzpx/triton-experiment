@@ -3,11 +3,18 @@
 #ifndef KD_CLOSEST_QUERY_CUH
 #define KD_CLOSEST_QUERY_CUH
 
+#include <cuda_runtime.h>
 #include <torch/extension.h>
 
-#include <cuda_runtime.h>
+#include <omp.h>
+
+#define CUKD_BUILDER_INPLACE
 #include <cukd/builder.h>
 #include <cukd/fcp.h>
+
+#include <tiny-cuda-nn/common_host.h>
+#include <tiny-cuda-nn/gpu_memory.h>
+#include <tiny-cuda-nn/multi_stream.h>
 
 template <typename PointT> struct OrderedPoint {
   PointT position;
@@ -80,8 +87,8 @@ ClosestPointKernel(T *d_dists, int *d_indices, PointT *d_queries, int n_batches,
 }
 
 template <typename T = float, typename PointT = float3,
-          uint32_t BATCH_SIZE_B = 32, uint32_t BATCH_SIZE_N = 16,
-          uint32_t BATCH_SIZE_M = 16>
+          uint32_t THREAD_POOL = 16, uint32_t BATCH_SIZE_B = 32,
+          uint32_t BATCH_SIZE_N = 16, uint32_t BATCH_SIZE_M = 16>
 std::vector<torch::Tensor> KDQueryClosest(cudaStream_t stream,
                                           const torch::Tensor &input,
                                           const torch::Tensor &query) {
@@ -90,29 +97,34 @@ std::vector<torch::Tensor> KDQueryClosest(cudaStream_t stream,
   uint32_t numQueries = query.size(1);
 
   // We must copy because implicit tree will re-arange input data
-  OrderedPoint<PointT> *d_input;
+  OrderedPoint<PointT> *d_nodes;
   CUKD_CUDA_CHECK(cudaMallocAsync(
-      (void **)&d_input, numBatches * numInput * sizeof(OrderedPoint<PointT>),
+      (void **)&d_nodes, numBatches * numInput * sizeof(OrderedPoint<PointT>),
       stream));
 
   // **IMPORTANT** We cannot loop, as data is in device memory
   CopyKernel<<<dim3(cukd::divRoundUp(numBatches, BATCH_SIZE_B),
                     cukd::divRoundUp(numInput, BATCH_SIZE_N)),
                dim3(BATCH_SIZE_B, BATCH_SIZE_N), 0, stream>>>(
-      d_input, reinterpret_cast<PointT *>(input.data_ptr<T>()), numBatches,
+      d_nodes, reinterpret_cast<PointT *>(input.data_ptr<T>()), numBatches,
       numInput);
-  CUKD_CUDA_SYNC_CHECK();
-  PointT *d_queries = reinterpret_cast<PointT *>(query.data_ptr<T>());
+  cudaStreamSynchronize(stream);
 
   cukd::box_t<PointT> *d_bounds;
   CUKD_CUDA_CHECK(cudaMallocAsync(
       (void **)&d_bounds, numBatches * sizeof(cukd::box_t<PointT>), stream));
 
+  // Build tree in parallel
+  tcnn::SyncedMultiStream syncedStreams(stream, THREAD_POOL);
+  omp_set_num_threads(THREAD_POOL);
+#pragma omp parallel for schedule(dynamic)
   for (int bid = 0; bid < numBatches; bid++) {
+    int tid = omp_get_thread_num();
     cukd::buildTree<OrderedPoint<PointT>, OrderedPoint_traits<PointT>>(
-        d_input + bid * numInput, numInput, d_bounds + bid, stream);
+        d_nodes + bid * numInput, numInput, d_bounds + bid,
+        syncedStreams.get(tid));
+    cudaStreamSynchronize(syncedStreams.get(tid));
   }
-  CUKD_CUDA_SYNC_CHECK();
 
   const torch::TensorOptions distOpts =
       torch::TensorOptions().dtype(query.dtype()).device(query.device());
@@ -125,9 +137,11 @@ std::vector<torch::Tensor> KDQueryClosest(cudaStream_t stream,
   ClosestPointKernel<<<dim3(cukd::divRoundUp(numBatches, BATCH_SIZE_B),
                             cukd::divRoundUp(numQueries, BATCH_SIZE_M)),
                        dim3(BATCH_SIZE_B, BATCH_SIZE_M), 0, stream>>>(
-      dists.data_ptr<T>(), idxs.data_ptr<int>(), d_queries, numBatches,
-      numQueries, d_bounds, d_input, numInput);
-  CUKD_CUDA_SYNC_CHECK();
+      dists.data_ptr<T>(), idxs.data_ptr<int>(),
+      reinterpret_cast<PointT *>(query.data_ptr<T>()), numBatches, numQueries,
+      d_bounds, d_nodes, numInput);
+  cudaStreamSynchronize(stream);
+
   return {dists, idxs};
 }
 

@@ -35,11 +35,10 @@ def max_supported_compute_capability(cuda_version):
         return 120
 
 
-if "TCNN_CUDA_ARCHITECTURES" in os.environ and os.environ[
-        "TCNN_CUDA_ARCHITECTURES"]:
+if "TCNN_CUDA_ARCHITECTURES" in os.environ and os.environ["TCNN_CUDA_ARCHITECTURES"]:
     compute_capabilities = [
-        int(x) for x in os.environ["TCNN_CUDA_ARCHITECTURES"].replace(
-            ";", ",").split(",")
+        int(x)
+        for x in os.environ["TCNN_CUDA_ARCHITECTURES"].replace(";", ",").split(",")
     ]
     print(
         f"Obtained compute capabilities {compute_capabilities} from environment variable TCNN_CUDA_ARCHITECTURES"
@@ -47,8 +46,7 @@ if "TCNN_CUDA_ARCHITECTURES" in os.environ and os.environ[
 elif torch.cuda.is_available():
     major, minor = torch.cuda.get_device_capability()
     compute_capabilities = [major * 10 + minor]
-    print(
-        f"Obtained compute capability {compute_capabilities[0]} from PyTorch")
+    print(f"Obtained compute capability {compute_capabilities[0]} from PyTorch")
 else:
     raise EnvironmentError(
         "Unknown compute capability. Specify the target compute capabilities in the TCNN_CUDA_ARCHITECTURES environment variable or install PyTorch with the CUDA backend to detect it automatically."
@@ -109,7 +107,8 @@ if cuda_version is not None:
         cpp_standard = 17
 
     supported_compute_capabilities = [
-        cc for cc in compute_capabilities
+        cc
+        for cc in compute_capabilities
         if cc >= min_supported_compute_capability(cuda_version)
         and cc <= max_supported_compute_capability(cuda_version)
     ]
@@ -138,6 +137,7 @@ base_nvcc_flags = [
     "-U__CUDA_NO_HALF_OPERATORS__",
     "-U__CUDA_NO_HALF_CONVERSIONS__",
     "-U__CUDA_NO_HALF2_OPERATORS__",
+    "-Xcompiler=-fopenmp"
 ]
 
 if os.name == "posix":
@@ -148,6 +148,12 @@ if os.name == "posix":
     ]
 
 base_definitions = ["-DTCNN_NO_NETWORKS"]
+
+base_source_files = [
+    f"{package_name}/third_party/tiny-cuda-nn/dependencies/fmt/src/format.cc",
+    f"{package_name}/third_party/tiny-cuda-nn/dependencies/fmt/src/os.cc",
+    f"{package_name}/third_party/tiny-cuda-nn/src/common_host.cu",
+]
 
 compute_capability = compute_capabilities[0]
 nvcc_flags = base_nvcc_flags + [
@@ -165,17 +171,17 @@ setup(
     ext_modules=[
         CUDAExtension(
             name=f"{package_name}._C",
-            sources=glob.glob(f"{package_name}/src/*.cu"),
+            sources=base_source_files + glob.glob(f"{package_name}/src/*.cu"),
             include_dirs=[
                 os.path.abspath(f"{package_name}/include"),
                 os.path.abspath(f"{package_name}/third_party/cudaKDTree"),
+                os.path.abspath(f"{package_name}/third_party/tiny-cuda-nn/include"),
                 os.path.abspath(
-                    f"{package_name}/third_party/tiny-cuda-nn/include"),
-                os.path.abspath(
-                    f"{package_name}/third_party/tiny-cuda-nn/dependencies"),
+                    f"{package_name}/third_party/tiny-cuda-nn/dependencies"
+                ),
                 os.path.abspath(
                     f"{package_name}/third_party/tiny-cuda-nn/dependencies/fmt/include"
-                )
+                ),
             ],
             extra_compile_args={
                 "cxx": cflags,
@@ -187,4 +193,5 @@ setup(
     packages=[package_name],
     zip_safe=False,
     python_requires=">=3.7",
-    cmdclass={"build_ext": BuildExtension})
+    cmdclass={"build_ext": BuildExtension},
+)
