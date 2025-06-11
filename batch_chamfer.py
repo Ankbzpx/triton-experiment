@@ -129,20 +129,25 @@ def nm_dist_kernel(
         xyz2_y_ptr = tl.advance(xyz2_y_ptr, (0, BLOCK_SIZE_M))
         xyz2_z_ptr = tl.advance(xyz2_z_ptr, (0, BLOCK_SIZE_M))
 
-    tl.store(
-        dists_ptr
-        + batch_base_b[:, None] * dist_stride_b
-        + batch_base_n[None, :] * dist_stride_n,
-        cur_best_d,
-        mask=batch_n_mask,
+    cur_best_d_ptr = tl.make_block_ptr(
+        base=dists_ptr,
+        shape=(B, N),
+        strides=(dist_stride_b, dist_stride_n),
+        offsets=(base_b, base_n),
+        block_shape=(BLOCK_SIZE_B, BLOCK_SIZE_N),
+        order=(1, 0),
     )
-    tl.store(
-        indices_ptr
-        + batch_base_b[:, None] * indices_stride_b
-        + batch_base_n[None, :] * indices_stride_n,
-        cur_best_idx,
-        mask=batch_n_mask,
+    tl.store(cur_best_d_ptr, cur_best_d, boundary_check=(0, 1))
+
+    cur_best_idx_ptr = tl.make_block_ptr(
+        base=indices_ptr,
+        shape=(B, N),
+        strides=(indices_stride_b, indices_stride_n),
+        offsets=(base_b, base_n),
+        block_shape=(BLOCK_SIZE_B, BLOCK_SIZE_N),
+        order=(1, 0),
     )
+    tl.store(cur_best_idx_ptr, cur_best_idx, boundary_check=(0, 1))
 
 
 def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
