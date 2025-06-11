@@ -12,12 +12,8 @@ from icecream import ic
 
 @triton.jit
 def nm_dist_kernel(
-    xyz1_x_ptr,
-    xyz1_y_ptr,
-    xyz1_z_ptr,
-    xyz2_x_ptr,
-    xyz2_y_ptr,
-    xyz2_z_ptr,
+    xyz1_ptr,
+    xyz2_ptr,
     dists_ptr,
     indices_ptr,
     B,
@@ -25,8 +21,10 @@ def nm_dist_kernel(
     M,
     xyz1_stride_b,
     xyz1_stride_n,
+    xyz1_stride_d,
     xyz2_stride_b,
     xyz2_stride_m,
+    xyz2_stride_d,
     dist_stride_b,
     dist_stride_n,
     indices_stride_b,
@@ -46,70 +44,90 @@ def nm_dist_kernel(
 
     batch_n_mask = (batch_base_b[:, None] < B) & (batch_base_n[None, :] < N)
 
-    xyz1_x = tl.load(
-        xyz1_x_ptr
-        + batch_base_b[:, None] * xyz1_stride_b
-        + batch_base_n[None, :] * xyz1_stride_n,
-        mask=batch_n_mask,
-        other=100,
+    xyz1_x_ptr = tl.make_block_ptr(
+        base=xyz1_ptr,
+        shape=(B, N),
+        strides=(xyz1_stride_b, xyz1_stride_n),
+        offsets=(base_b, base_n),
+        block_shape=(BLOCK_SIZE_B, BLOCK_SIZE_N),
+        order=(1, 0),
     )
-    xyz1_y = tl.load(
-        xyz1_y_ptr
-        + batch_base_b[:, None] * xyz1_stride_b
-        + batch_base_n[None, :] * xyz1_stride_n,
-        mask=batch_n_mask,
-        other=100,
+    xyz1_y_ptr = tl.make_block_ptr(
+        base=xyz1_ptr + 1,
+        shape=(B, N),
+        strides=(xyz1_stride_b, xyz1_stride_n),
+        offsets=(base_b, base_n),
+        block_shape=(BLOCK_SIZE_B, BLOCK_SIZE_N),
+        order=(1, 0),
     )
-    xyz1_z = tl.load(
-        xyz1_z_ptr
-        + batch_base_b[:, None] * xyz1_stride_b
-        + batch_base_n[None, :] * xyz1_stride_n,
-        mask=batch_n_mask,
-        other=100,
+    xyz1_z_ptr = tl.make_block_ptr(
+        base=xyz1_ptr + 2,
+        shape=(B, N),
+        strides=(xyz1_stride_b, xyz1_stride_n),
+        offsets=(base_b, base_n),
+        block_shape=(BLOCK_SIZE_B, BLOCK_SIZE_N),
+        order=(1, 0),
     )
+
+    xyz1_x = tl.load(xyz1_x_ptr, boundary_check=(0, 1))
+    xyz1_y = tl.load(xyz1_y_ptr, boundary_check=(0, 1))
+    xyz1_z = tl.load(xyz1_z_ptr, boundary_check=(0, 1))
 
     cur_best_d = tl.full((BLOCK_SIZE_B, BLOCK_SIZE_N), float("inf"), tl.float32)
     cur_best_idx = tl.zeros((BLOCK_SIZE_B, BLOCK_SIZE_N), tl.int32)
 
+    xyz2_x_ptr = tl.make_block_ptr(
+        base=xyz2_ptr,
+        shape=(B, M),
+        strides=(xyz2_stride_b, xyz2_stride_m),
+        offsets=(base_b, 0),
+        block_shape=(BLOCK_SIZE_B, BLOCK_SIZE_M),
+        order=(1, 0),
+    )
+    xyz2_y_ptr = tl.make_block_ptr(
+        base=xyz2_ptr + 1,
+        shape=(B, M),
+        strides=(xyz2_stride_b, xyz2_stride_m),
+        offsets=(base_b, 0),
+        block_shape=(BLOCK_SIZE_B, BLOCK_SIZE_M),
+        order=(1, 0),
+    )
+    xyz2_z_ptr = tl.make_block_ptr(
+        base=xyz2_ptr + 2,
+        shape=(B, M),
+        strides=(xyz2_stride_b, xyz2_stride_m),
+        offsets=(base_b, 0),
+        block_shape=(BLOCK_SIZE_B, BLOCK_SIZE_M),
+        order=(1, 0),
+    )
+
     for base_m in tl.range(0, M, BLOCK_SIZE_M):
         batch_base_m = base_m + tl.arange(0, BLOCK_SIZE_M)
         batch_m_mask = (batch_base_b[:, None] < B) & (batch_base_m[None, :] < M)
-        xyz2_x = tl.load(
-            xyz2_x_ptr
-            + batch_base_b[:, None] * xyz2_stride_b
-            + batch_base_m[None, :] * xyz2_stride_m,
-            mask=batch_m_mask,
-            other=-100,
-        )
-        xyz2_y = tl.load(
-            xyz2_y_ptr
-            + batch_base_b[:, None] * xyz2_stride_b
-            + batch_base_m[None, :] * xyz2_stride_m,
-            mask=batch_m_mask,
-            other=-100,
-        )
-        xyz2_z = tl.load(
-            xyz2_z_ptr
-            + batch_base_b[:, None] * xyz2_stride_b
-            + batch_base_m[None, :] * xyz2_stride_m,
-            mask=batch_m_mask,
-            other=-100,
-        )
+
+        xyz2_x = tl.load(xyz2_x_ptr, boundary_check=(0, 1))
+        xyz2_y = tl.load(xyz2_y_ptr, boundary_check=(0, 1))
+        xyz2_z = tl.load(xyz2_z_ptr, boundary_check=(0, 1))
 
         x2 = xyz1_x[:, :, None] - xyz2_x[:, None, :]
         y2 = xyz1_y[:, :, None] - xyz2_y[:, None, :]
         z2 = xyz1_z[:, :, None] - xyz2_z[:, None, :]
         d = x2 * x2 + y2 * y2 + z2 * z2
 
-        best_d = tl.min(d, axis=2)
+        d_mask = batch_n_mask[:, :, None] & batch_m_mask[:, None, :]
+        d = tl.where(d_mask, d, float("inf"))
 
-        # ​TODO: sqrt depends on SLU. Let pytorch handle it for now
-        # best_d = tl.sqrt(best_d)
+        best_d = tl.min(d, axis=2)
         best_idx = tl.argmin(d, axis=2) + base_m
 
         mask = best_d < cur_best_d
         cur_best_d = tl.where(mask, best_d, cur_best_d)
         cur_best_idx = tl.where(mask, best_idx, cur_best_idx)
+
+        # Increament ptr
+        xyz2_x_ptr = tl.advance(xyz2_x_ptr, (0, BLOCK_SIZE_M))
+        xyz2_y_ptr = tl.advance(xyz2_y_ptr, (0, BLOCK_SIZE_M))
+        xyz2_z_ptr = tl.advance(xyz2_z_ptr, (0, BLOCK_SIZE_M))
 
     tl.store(
         dists_ptr
@@ -128,16 +146,12 @@ def nm_dist_kernel(
 
 
 def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
-    xyz1_x = xyz1[..., 0].contiguous()
-    xyz1_y = xyz1[..., 1].contiguous()
-    xyz1_z = xyz1[..., 2].contiguous()
+    assert xyz1.shape[-1] == xyz2.shape[-1], "Incompatible dimensions"
+    assert xyz1.is_contiguous(), "Matrix xyz1 must be contiguous"
+    assert xyz2.is_contiguous(), "Matrix xyz2 must be contiguous"
 
-    xyz2_x = xyz2[..., 0].contiguous()
-    xyz2_y = xyz2[..., 1].contiguous()
-    xyz2_z = xyz2[..., 2].contiguous()
-
-    B, N = xyz1_x.shape
-    B, M = xyz2_x.shape
+    B, N, D = xyz1.shape
+    B, M, D = xyz2.shape
 
     dists = torch.zeros((B, N), device=xyz1.device, dtype=xyz1.dtype)
     indices = torch.zeros((B, N), device=xyz1.device, dtype=torch.int32)
@@ -156,21 +170,19 @@ def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
     }
 
     nm_dist_kernel[grid](
-        xyz1_x,
-        xyz1_y,
-        xyz1_z,
-        xyz2_x,
-        xyz2_y,
-        xyz2_z,
+        xyz1,
+        xyz2,
         dists,
         indices,
         B,
         N,
         M,
-        xyz1_x.stride(0),
-        xyz1_x.stride(1),
-        xyz2_x.stride(0),
-        xyz2_x.stride(1),
+        xyz1.stride(0),
+        xyz1.stride(1),
+        xyz1.stride(2),
+        xyz2.stride(0),
+        xyz2.stride(1),
+        xyz2.stride(2),
         dists.stride(0),
         dists.stride(1),
         indices.stride(0),
@@ -205,6 +217,7 @@ if __name__ == "__main__":
     ic(torch.allclose(idx1, idx1_mashcpp))
     ic(torch.allclose(dist2, dist2_mashcpp))
     ic(torch.allclose(idx2, idx2_mashcpp))
+    exit()
 
     configs = []
     configs.append(
