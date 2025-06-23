@@ -44,71 +44,68 @@ def nm_dist_kernel(
     base_n = pid_n * BLOCK_SIZE_N
     base_m = pid_m * BLOCK_SIZE_M
 
-    batch_base_b = base_b + tl.arange(0, BLOCK_SIZE_B)
     batch_base_n = base_n + tl.arange(0, BLOCK_SIZE_N)
     batch_base_m = base_m + tl.arange(0, BLOCK_SIZE_M)
 
-    batch_n_mask = (batch_base_b[:, None] < B) & (batch_base_n[None, :] < N)
-    batch_m_mask = (batch_base_b[:, None] < B) & (batch_base_m[None, :] < M)
+    batch_n_mask = batch_base_n < N
+    batch_m_mask = batch_base_m < M
 
-    d = tl.zeros((BLOCK_SIZE_B, BLOCK_SIZE_N, BLOCK_SIZE_M), tl.float32)
-    for i in tl.static_range(3):
-        xyz1 = tl.load(
-            xyz1_ptr
-            + batch_base_b[:, None] * xyz1_stride_b
-            + batch_base_n[None, :] * xyz1_stride_n
-            + i * xyz1_stride_d,
-            mask=batch_n_mask,
-            other=100,
-        )
-        xyz2 = tl.load(
-            xyz2_ptr
-            + batch_base_b[:, None] * xyz2_stride_b
-            + batch_base_m[None, :] * xyz2_stride_m
-            + i * xyz2_stride_d,
-            mask=batch_m_mask,
-            other=-100,
-        )
-        diff = xyz1[:, :, None] - xyz2[:, None, :]
-        d += diff * diff
+    for offset in tl.range(BLOCK_SIZE_B):
+        batch_base_b = base_b + offset
 
-    best_d = tl.min(d, axis=2)
+        if batch_base_b < B:
+            d = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_M), tl.float32)
+            for i in tl.static_range(3):
+                xyz1 = tl.load(
+                    xyz1_ptr
+                    + batch_base_b * xyz1_stride_b
+                    + batch_base_n * xyz1_stride_n
+                    + i * xyz1_stride_d,
+                    mask=batch_n_mask,
+                    other=100,
+                )
+                xyz2 = tl.load(
+                    xyz2_ptr
+                    + batch_base_b * xyz2_stride_b
+                    + batch_base_m * xyz2_stride_m
+                    + i * xyz2_stride_d,
+                    mask=batch_m_mask,
+                    other=-100,
+                )
 
-    # ​TODO: sqrt depends on SLU. Let pytorch handle it for now
-    # best_d = tl.sqrt(best_d)
-    best_idx = tl.argmin(d, axis=2) + base_m
+                diff = xyz1[:, None] - xyz2[None, :]
+                d += diff * diff
 
-    lock = lock_ptr + pid_b * lock_stride_b + pid_n * lock_stride_n
-    while tl.atomic_cas(lock, 0, 1) == 1:
-        pass
+            best_d = tl.min(d, axis=1)
+            best_idx = tl.argmin(d, axis=1) + base_m
 
-    cur_best_d = tl.load(
-        dists_ptr
-        + batch_base_b[:, None] * dist_stride_b
-        + batch_base_n[None, :] * dist_stride_n,
-        mask=batch_n_mask,
-    )
+            lock = lock_ptr + pid_b * lock_stride_b + pid_n * lock_stride_n
+            while tl.atomic_cas(lock, 0, 1) == 1:
+                pass
 
-    # Handle zero initialization in JAX
-    # FIXME: The safer option is to use another lock for first occuring pid_n initialization
-    out_mask = ((best_d < cur_best_d) | (cur_best_d == 0)) & batch_n_mask
-    tl.store(
-        dists_ptr
-        + batch_base_b[:, None] * dist_stride_b
-        + batch_base_n[None, :] * dist_stride_n,
-        best_d,
-        mask=out_mask,
-    )
-    tl.store(
-        indices_ptr
-        + batch_base_b[:, None] * indices_stride_b
-        + batch_base_n[None, :] * indices_stride_n,
-        best_idx,
-        mask=out_mask,
-    )
+            cur_best_d = tl.load(
+                dists_ptr + batch_base_b * dist_stride_b + batch_base_n * dist_stride_n,
+                mask=batch_n_mask,
+            )
 
-    # Release lock
-    tl.atomic_xchg(lock, 0)
+            # Handle zero initialization in JAX
+            # FIXME: The safer option is to use another lock for first occuring pid_n initialization
+            out_mask = ((best_d < cur_best_d) | (cur_best_d == 0)) & batch_n_mask
+            tl.store(
+                dists_ptr + batch_base_b * dist_stride_b + batch_base_n * dist_stride_n,
+                best_d,
+                mask=out_mask,
+            )
+            tl.store(
+                indices_ptr
+                + batch_base_b * indices_stride_b
+                + batch_base_n * indices_stride_n,
+                best_idx,
+                mask=out_mask,
+            )
+
+            # Release lock
+            tl.atomic_xchg(lock, 0)
 
 
 def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
@@ -129,7 +126,7 @@ def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
     )
 
     configs = {
-        "BLOCK_SIZE_B": 1,
+        "BLOCK_SIZE_B": 4,
         "BLOCK_SIZE_N": 16,
         "BLOCK_SIZE_M": 512,
         "num_warps": 2,
@@ -219,11 +216,6 @@ if __name__ == "__main__":
     import mash_cpp
 
     torch.manual_seed(0)
-
-    # xyz1 = torch.randn(2, 17, 3).cuda()
-    # xyz2 = torch.randn(2, 33, 3).cuda()
-    # dist1, idx1 = nm_dist(xyz1, xyz2)
-    # exit()
 
     xyz1 = torch.randn(10000, 1600, 3).cuda()
     xyz2 = torch.randn(10000, 1000, 3).cuda()
