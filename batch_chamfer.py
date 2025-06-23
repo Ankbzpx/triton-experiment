@@ -10,6 +10,24 @@ import triton.language as tl
 from icecream import ic
 
 
+def get_cuda_autotune_config():
+    return [
+        triton.Config(
+            {
+                "BLOCK_SIZE_B": BLOCK_SIZE_B,
+                "BLOCK_SIZE_N": BLOCK_SIZE_N,
+                "BLOCK_SIZE_M": int(32768 / BLOCK_SIZE_B / BLOCK_SIZE_N),
+            },
+            num_warps=num_warps,
+            num_stages=3,
+        )
+        for BLOCK_SIZE_B in [1, 16, 32]
+        for BLOCK_SIZE_N in [16, 32, 64]
+        for num_warps in [2, 4, 8]
+    ]
+
+
+# @triton.autotune(configs=get_cuda_autotune_config(), key=["B", "N", "M"])
 @triton.jit
 def nm_dist_kernel(
     xyz1_ptr,
@@ -63,6 +81,7 @@ def nm_dist_kernel(
                     + i * xyz1_stride_d,
                     mask=batch_n_mask,
                     other=100,
+                    cache_modifier=".ca",
                 )
                 xyz2 = tl.load(
                     xyz2_ptr
@@ -71,6 +90,7 @@ def nm_dist_kernel(
                     + i * xyz2_stride_d,
                     mask=batch_m_mask,
                     other=-100,
+                    cache_modifier=".ca",
                 )
 
                 diff = xyz1[:, None] - xyz2[None, :]
@@ -80,12 +100,13 @@ def nm_dist_kernel(
             best_idx = tl.argmin(d, axis=1) + base_m
 
             lock = lock_ptr + pid_b * lock_stride_b + pid_n * lock_stride_n
-            while tl.atomic_cas(lock, 0, 1) == 1:
+            while tl.atomic_cas(lock, 0, 1, sem="acq_rel", scope="cta") == 1:
                 pass
 
             cur_best_d = tl.load(
                 dists_ptr + batch_base_b * dist_stride_b + batch_base_n * dist_stride_n,
                 mask=batch_n_mask,
+                eviction_policy="evict_first",
             )
 
             # Handle zero initialization in JAX
@@ -95,6 +116,7 @@ def nm_dist_kernel(
                 dists_ptr + batch_base_b * dist_stride_b + batch_base_n * dist_stride_n,
                 best_d,
                 mask=out_mask,
+                eviction_policy="evict_first",
             )
             tl.store(
                 indices_ptr
@@ -102,10 +124,22 @@ def nm_dist_kernel(
                 + batch_base_n * indices_stride_n,
                 best_idx,
                 mask=out_mask,
+                eviction_policy="evict_first",
             )
 
             # Release lock
-            tl.atomic_xchg(lock, 0)
+            tl.atomic_xchg(lock, 0, sem="release", scope="cta")
+
+
+# Heuristic..
+def cmp(M, dim1, dim2):
+    n1 = triton.cdiv(M, dim1)
+    n2 = triton.cdiv(M, dim2)
+
+    if n1 * dim1 - M < n2 * dim2 - M:
+        return True
+    else:
+        return False
 
 
 def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
@@ -125,14 +159,25 @@ def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
         triton.cdiv(B, META["BLOCK_SIZE_B"]),
     )
 
-    configs = {
-        "BLOCK_SIZE_B": 4,
-        "BLOCK_SIZE_N": 16,
-        "BLOCK_SIZE_M": 512,
-        "num_warps": 2,
-        "num_stages": 3,
-    }
+    configs = (
+        {
+            "BLOCK_SIZE_B": 1,
+            "BLOCK_SIZE_N": 16,
+            "BLOCK_SIZE_M": 512,
+            "num_warps": 2,
+            "num_stages": 3,
+        }
+        if cmp(M, 512, 2048)
+        else {
+            "BLOCK_SIZE_B": 1,
+            "BLOCK_SIZE_N": 16,
+            "BLOCK_SIZE_M": 2048,
+            "num_warps": 4,
+            "num_stages": 3,
+        }
+    )
 
+    # FIXME: Lock size is overkill...
     lock = torch.zeros(
         (
             triton.cdiv(B, configs["BLOCK_SIZE_B"]),
@@ -229,7 +274,6 @@ if __name__ == "__main__":
     dist1_mashcpp, dist2_mashcpp, idx1_mashcpp, idx2_mashcpp = (
         mash_cpp.toChamferDistance(xyz1, xyz2)
     )
-    # exit()
 
     def test_loss(d1: torch.Tensor, d2: torch.Tensor):
         return d1.mean() - d2.sum()
@@ -250,7 +294,7 @@ if __name__ == "__main__":
     ic(torch.allclose(idx1, idx1_mashcpp))
     ic(torch.allclose(dist2, dist2_mashcpp))
     ic(torch.allclose(idx2, idx2_mashcpp))
-    exit()
+    # exit()
 
     configs = []
     configs.append(
@@ -270,8 +314,8 @@ if __name__ == "__main__":
     @triton.testing.perf_report(configs)
     def benchmark(B, M, N, provider):
         ic(B)
-        xyz1 = torch.randn(B, 1536, 3).cuda()
-        xyz2 = torch.randn(B, 1024, 3).cuda()
+        xyz1 = torch.randn(B, 1600, 3).cuda()
+        xyz2 = torch.randn(B, 1000, 3).cuda()
         quantiles = [0.5, 0.2, 0.8]
         if provider == "CUDA":
             ms, min_ms, max_ms = triton.testing.do_bench(
