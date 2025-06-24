@@ -11,33 +11,47 @@ from icecream import ic
 
 
 def get_cuda_autotune_config():
-    return [
-        triton.Config(
-            {
-                "BLOCK_SIZE_B": BLOCK_SIZE_B,
-                "BLOCK_SIZE_N": BLOCK_SIZE_N,
-                "BLOCK_SIZE_M": int(32768 / BLOCK_SIZE_B / BLOCK_SIZE_N),
-            },
-            num_warps=num_warps,
-            num_stages=3,
-        )
-        for BLOCK_SIZE_B in [1, 16, 32]
-        for BLOCK_SIZE_N in [16, 32, 64]
-        for num_warps in [2, 4, 8]
-    ] + [
-        triton.Config(
-            {
-                "BLOCK_SIZE_B": BLOCK_SIZE_B,
-                "BLOCK_SIZE_N": BLOCK_SIZE_N,
-                "BLOCK_SIZE_M": int(65536 / BLOCK_SIZE_B / BLOCK_SIZE_N),
-            },
-            num_warps=num_warps,
-            num_stages=3,
-        )
-        for BLOCK_SIZE_B in [1, 16, 32]
-        for BLOCK_SIZE_N in [16, 32, 64]
-        for num_warps in [2, 4, 8]
-    ]
+    return (
+        [
+            triton.Config(
+                {
+                    "BLOCK_SIZE_B": 1,
+                    "BLOCK_SIZE_N": BLOCK_SIZE_N,
+                    "BLOCK_SIZE_M": int(16384 / BLOCK_SIZE_N),
+                },
+                num_warps=num_warps,
+                num_stages=3,
+            )
+            for BLOCK_SIZE_N in [16, 32, 64]
+            for num_warps in [2, 4, 8]
+        ]
+        + [
+            triton.Config(
+                {
+                    "BLOCK_SIZE_B": 1,
+                    "BLOCK_SIZE_N": BLOCK_SIZE_N,
+                    "BLOCK_SIZE_M": int(32768 / BLOCK_SIZE_N),
+                },
+                num_warps=num_warps,
+                num_stages=3,
+            )
+            for BLOCK_SIZE_N in [16, 32, 64]
+            for num_warps in [2, 4, 8]
+        ]
+        + [
+            triton.Config(
+                {
+                    "BLOCK_SIZE_B": 1,
+                    "BLOCK_SIZE_N": BLOCK_SIZE_N,
+                    "BLOCK_SIZE_M": int(65536 / BLOCK_SIZE_N),
+                },
+                num_warps=num_warps,
+                num_stages=3,
+            )
+            for BLOCK_SIZE_N in [16, 32, 64]
+            for num_warps in [2, 4, 8]
+        ]
+    )
 
 
 # @triton.autotune(configs=get_cuda_autotune_config(), key=["B", "N", "M"])
@@ -45,7 +59,6 @@ def get_cuda_autotune_config():
 def nm_dist_kernel(
     xyz1_ptr,
     xyz2_ptr,
-    lock_ptr,
     dists_ptr,
     indices_ptr,
     B,
@@ -61,110 +74,130 @@ def nm_dist_kernel(
     dist_stride_n,
     indices_stride_b,
     indices_stride_n,
-    lock_stride_b,
-    lock_stride_n,
     BLOCK_SIZE_B: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
 ):
+    pid_b = tl.program_id(axis=1)
     pid_n = tl.program_id(axis=0)
-    pid_m = tl.program_id(axis=1)
-    pid_b = tl.program_id(axis=2)
 
     base_b = pid_b * BLOCK_SIZE_B
     base_n = pid_n * BLOCK_SIZE_N
-    base_m = pid_m * BLOCK_SIZE_M
 
+    batch_base_b = base_b + tl.arange(0, BLOCK_SIZE_B)
     batch_base_n = base_n + tl.arange(0, BLOCK_SIZE_N)
-    batch_base_m = base_m + tl.arange(0, BLOCK_SIZE_M)
 
-    batch_n_mask = batch_base_n < N
-    batch_m_mask = batch_base_m < M
+    batch_n_mask = (batch_base_b[:, None] < B) & (batch_base_n[None, :] < N)
 
-    for offset in tl.range(BLOCK_SIZE_B):
-        batch_base_b = base_b + offset
+    xyz1_x_ptr = tl.make_block_ptr(
+        base=xyz1_ptr,
+        shape=(B, N),
+        strides=(xyz1_stride_b, xyz1_stride_n),
+        offsets=(base_b, base_n),
+        block_shape=(BLOCK_SIZE_B, BLOCK_SIZE_N),
+        order=(1, 0),
+    )
+    xyz1_y_ptr = tl.make_block_ptr(
+        base=xyz1_ptr + 1,
+        shape=(B, N),
+        strides=(xyz1_stride_b, xyz1_stride_n),
+        offsets=(base_b, base_n),
+        block_shape=(BLOCK_SIZE_B, BLOCK_SIZE_N),
+        order=(1, 0),
+    )
+    xyz1_z_ptr = tl.make_block_ptr(
+        base=xyz1_ptr + 2,
+        shape=(B, N),
+        strides=(xyz1_stride_b, xyz1_stride_n),
+        offsets=(base_b, base_n),
+        block_shape=(BLOCK_SIZE_B, BLOCK_SIZE_N),
+        order=(1, 0),
+    )
 
-        if batch_base_b < B:
-            d = tl.zeros((1, BLOCK_SIZE_N, BLOCK_SIZE_M), tl.float32)
-            for i in tl.static_range(3):
-                xyz1_block_ptr = tl.make_block_ptr(
-                    base=xyz1_ptr + i,
-                    shape=(B, N),
-                    strides=(xyz1_stride_b, xyz1_stride_n),
-                    offsets=(batch_base_b, base_n),
-                    block_shape=(1, BLOCK_SIZE_N),
-                    order=(1, 0),
-                )
-                xyz1 = tl.load(xyz1_block_ptr)
-                xyz1 = tl.where(batch_n_mask[None, :], xyz1, float("inf"))
+    xyz1_x = tl.load(xyz1_x_ptr)
+    xyz1_y = tl.load(xyz1_y_ptr)
+    xyz1_z = tl.load(xyz1_z_ptr)
 
-                xyz2_block_ptr = tl.make_block_ptr(
-                    base=xyz2_ptr + i,
-                    shape=(B, M),
-                    strides=(xyz2_stride_b, xyz2_stride_m),
-                    offsets=(batch_base_b, base_m),
-                    block_shape=(1, BLOCK_SIZE_M),
-                    order=(1, 0),
-                )
-                xyz2 = tl.load(xyz2_block_ptr)
-                xyz2 = tl.where(batch_m_mask[None, :], xyz2, -float("inf"))
+    xyz1_x = tl.where(batch_n_mask, xyz1_x, float("inf"))
+    xyz1_y = tl.where(batch_n_mask, xyz1_y, float("inf"))
+    xyz1_z = tl.where(batch_n_mask, xyz1_z, float("inf"))
 
-                diff = xyz1[:, :, None] - xyz2[:, None, :]
-                d += diff * diff
+    cur_best_d = tl.full((BLOCK_SIZE_B, BLOCK_SIZE_N), float("inf"), tl.float32)
+    cur_best_idx = tl.zeros((BLOCK_SIZE_B, BLOCK_SIZE_N), tl.int32)
 
-            best_d, best_idx = tl.min(d, axis=2, return_indices=True)
-            best_idx += base_m
+    xyz2_x_ptr = tl.make_block_ptr(
+        base=xyz2_ptr,
+        shape=(B, M),
+        strides=(xyz2_stride_b, xyz2_stride_m),
+        offsets=(base_b, 0),
+        block_shape=(BLOCK_SIZE_B, BLOCK_SIZE_M),
+        order=(1, 0),
+    )
+    xyz2_y_ptr = tl.make_block_ptr(
+        base=xyz2_ptr + 1,
+        shape=(B, M),
+        strides=(xyz2_stride_b, xyz2_stride_m),
+        offsets=(base_b, 0),
+        block_shape=(BLOCK_SIZE_B, BLOCK_SIZE_M),
+        order=(1, 0),
+    )
+    xyz2_z_ptr = tl.make_block_ptr(
+        base=xyz2_ptr + 2,
+        shape=(B, M),
+        strides=(xyz2_stride_b, xyz2_stride_m),
+        offsets=(base_b, 0),
+        block_shape=(BLOCK_SIZE_B, BLOCK_SIZE_M),
+        order=(1, 0),
+    )
 
-            lock = lock_ptr + pid_b * lock_stride_b + pid_n * lock_stride_n
-            while tl.atomic_cas(lock, 0, 1, sem="acq_rel", scope="cta") == 1:
-                pass
+    for base_m in tl.range(0, M, BLOCK_SIZE_M):
+        batch_base_m = base_m + tl.arange(0, BLOCK_SIZE_M)
+        batch_m_mask = (batch_base_b[:, None] < B) & (batch_base_m[None, :] < M)
 
-            cur_best_d_block_ptr = tl.make_block_ptr(
-                base=dists_ptr,
-                shape=(B, N),
-                strides=(dist_stride_b, dist_stride_n),
-                offsets=(batch_base_b, base_n),
-                block_shape=(1, BLOCK_SIZE_N),
-                order=(1, 0),
-            )
-            cur_best_idx_block_ptr = tl.make_block_ptr(
-                base=indices_ptr,
-                shape=(B, N),
-                strides=(indices_stride_b, indices_stride_n),
-                offsets=(batch_base_b, base_n),
-                block_shape=(1, BLOCK_SIZE_N),
-                order=(1, 0),
-            )
+        xyz2_x = tl.load(xyz2_x_ptr)
+        xyz2_y = tl.load(xyz2_y_ptr)
+        xyz2_z = tl.load(xyz2_z_ptr)
 
-            cur_best_d = tl.load(cur_best_d_block_ptr)
-            cur_best_idx = tl.load(cur_best_idx_block_ptr)
+        xyz2_x = tl.where(batch_m_mask, xyz2_x, -float("inf"))
+        xyz2_y = tl.where(batch_m_mask, xyz2_y, -float("inf"))
+        xyz2_z = tl.where(batch_m_mask, xyz2_z, -float("inf"))
 
-            save_mask = best_d < cur_best_d
-            cur_best_d = tl.where(save_mask, best_d, cur_best_d)
-            cur_best_idx = tl.where(save_mask, best_idx, cur_best_idx)
+        x2 = xyz1_x[:, :, None] - xyz2_x[:, None, :]
+        y2 = xyz1_y[:, :, None] - xyz2_y[:, None, :]
+        z2 = xyz1_z[:, :, None] - xyz2_z[:, None, :]
+        d = x2 * x2 + y2 * y2 + z2 * z2
 
-            tl.store(cur_best_d_block_ptr, cur_best_d, boundary_check=(0, 1))
-            tl.store(cur_best_idx_block_ptr, cur_best_idx, boundary_check=(0, 1))
+        best_d, best_idx = tl.min(d, axis=2, return_indices=True)
+        best_idx += base_m
 
-            # Release lock
-            tl.atomic_xchg(lock, 0, sem="release", scope="cta")
+        mask = best_d < cur_best_d
+        cur_best_d = tl.where(mask, best_d, cur_best_d)
+        cur_best_idx = tl.where(mask, best_idx, cur_best_idx)
 
+        # Increament ptr
+        xyz2_x_ptr = tl.advance(xyz2_x_ptr, (0, BLOCK_SIZE_M))
+        xyz2_y_ptr = tl.advance(xyz2_y_ptr, (0, BLOCK_SIZE_M))
+        xyz2_z_ptr = tl.advance(xyz2_z_ptr, (0, BLOCK_SIZE_M))
 
-def get_config(M):
-    block_dim_m = np.array([256, 512, 1024, 2048])
-    block_dim_n = np.array([32, 16, 32, 16])
-    num_warps = np.array([2, 2, 2, 4])
+    cur_best_d_ptr = tl.make_block_ptr(
+        base=dists_ptr,
+        shape=(B, N),
+        strides=(dist_stride_b, dist_stride_n),
+        offsets=(base_b, base_n),
+        block_shape=(BLOCK_SIZE_B, BLOCK_SIZE_N),
+        order=(1, 0),
+    )
+    tl.store(cur_best_d_ptr, cur_best_d, boundary_check=(0, 1))
 
-    tails = triton.cdiv(M, block_dim_m)
-    idx = np.argmin(tails)
-
-    return {
-        "BLOCK_SIZE_B": 1,
-        "BLOCK_SIZE_N": block_dim_n[idx].item(),
-        "BLOCK_SIZE_M": block_dim_m[idx].item(),
-        "num_warps": num_warps[idx].item(),
-        "num_stages": 3,
-    }
+    cur_best_idx_ptr = tl.make_block_ptr(
+        base=indices_ptr,
+        shape=(B, N),
+        strides=(indices_stride_b, indices_stride_n),
+        offsets=(base_b, base_n),
+        block_shape=(BLOCK_SIZE_B, BLOCK_SIZE_N),
+        order=(1, 0),
+    )
+    tl.store(cur_best_idx_ptr, cur_best_idx, boundary_check=(0, 1))
 
 
 def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
@@ -175,30 +208,25 @@ def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
     B, N, D = xyz1.shape
     B, M, D = xyz2.shape
 
-    dists = torch.inf * torch.ones((B, N), device=xyz1.device, dtype=xyz1.dtype)
+    dists = torch.zeros((B, N), device=xyz1.device, dtype=xyz1.dtype)
     indices = torch.zeros((B, N), device=xyz1.device, dtype=torch.int32)
 
     grid = lambda META: (
         triton.cdiv(N, META["BLOCK_SIZE_N"]),
-        triton.cdiv(M, META["BLOCK_SIZE_M"]),
         triton.cdiv(B, META["BLOCK_SIZE_B"]),
     )
 
-    configs = get_config(M)
-
-    lock = torch.zeros(
-        (
-            triton.cdiv(B, configs["BLOCK_SIZE_B"]),
-            triton.cdiv(N, configs["BLOCK_SIZE_N"]),
-        ),
-        device=xyz1.device,
-        dtype=torch.int32,
-    )
+    configs = {
+        "BLOCK_SIZE_B": 1,
+        "BLOCK_SIZE_N": 16,
+        "BLOCK_SIZE_M": 1024,
+        "num_warps": 2,
+        "num_stages": 3,
+    }
 
     nm_dist_kernel[grid](
         xyz1,
         xyz2,
-        lock,
         dists,
         indices,
         B,
@@ -214,55 +242,15 @@ def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
         dists.stride(1),
         indices.stride(0),
         indices.stride(1),
-        lock.stride(0),
-        lock.stride(1),
         **configs,
     )
     return dists, indices
 
 
-@torch.library.custom_op("mash::chamfer_distance", mutates_args=())
-def chamfer_distance(xyz1: torch.Tensor, xyz2: torch.Tensor) -> List[torch.Tensor]:
+def chamfer_distance(xyz1: torch.Tensor, xyz2: torch.Tensor):
     dist1, idx1 = nm_dist(xyz1, xyz2)
     dist2, idx2 = nm_dist(xyz2, xyz1)
     return dist1, idx1, dist2, idx2
-
-
-def chamfer_distance_setup_context(ctx, inputs, output):
-    xyz1, xyz2 = inputs
-    _, idx1, _, idx2 = output
-    ctx.save_for_backward(xyz1, idx1, xyz2, idx2)
-
-
-def chamfer_distance_backward(ctx, grad_out):
-    xyz1, idx1, xyz2, idx2 = ctx.saved_tensors
-    grad_dist1, _, grad_dist2, _ = grad_out
-
-    d1 = xyz1 - torch.gather(xyz2, 1, idx1[..., None].expand(-1, -1, 3).long())
-    d2 = xyz2 - torch.gather(xyz1, 1, idx2[..., None].expand(-1, -1, 3).long())
-
-    d_dist1 = grad_dist1[..., None] * 2 * d1
-    d_dist2 = grad_dist2[..., None] * 2 * d2
-
-    grad_xyz1 = torch.scatter_add(
-        d_dist1, 1, idx2[..., None].expand(-1, -1, 3).long(), -d_dist2
-    )
-    grad_xyz2 = torch.scatter_add(
-        d_dist2, 1, idx1[..., None].expand(-1, -1, 3).long(), -d_dist1
-    )
-    return grad_xyz1, grad_xyz2
-
-
-chamfer_distance.register_autograd(
-    chamfer_distance_backward, setup_context=chamfer_distance_setup_context
-)
-
-
-def gradient(y, x, grad_outputs=None):
-    if grad_outputs is None:
-        grad_outputs = torch.ones_like(y)
-    grad = torch.autograd.grad(y, [x], grad_outputs=grad_outputs, create_graph=True)[0]
-    return grad
 
 
 if __name__ == "__main__":
@@ -273,30 +261,13 @@ if __name__ == "__main__":
     xyz1 = torch.randn(10000, 1600, 3).cuda()
     xyz2 = torch.randn(10000, 1000, 3).cuda()
 
-    xyz1.requires_grad_(True)
-    xyz2.requires_grad_(True)
-
-    dist1, idx1, dist2, idx2 = chamfer_distance(xyz1, xyz2)
+    dist1, idx1 = nm_dist(xyz1, xyz2)
+    dist2, idx2 = nm_dist(xyz2, xyz1)
     # exit()
 
     dist1_mashcpp, dist2_mashcpp, idx1_mashcpp, idx2_mashcpp = (
         mash_cpp.toChamferDistance(xyz1, xyz2)
     )
-
-    def test_loss(d1: torch.Tensor, d2: torch.Tensor):
-        return d1.mean() - d2.sum()
-
-    loss = test_loss(dist1, dist2)
-    loss_mashcpp = test_loss(dist1_mashcpp, dist2_mashcpp)
-
-    d_xyz1 = gradient(loss, xyz1)
-    d_xyz2 = gradient(loss, xyz2)
-
-    d_xyz1_mashcpp = gradient(loss_mashcpp, xyz1)
-    d_xyz2_mashcpp = gradient(loss_mashcpp, xyz2)
-
-    ic(torch.allclose(d_xyz1_mashcpp, d_xyz1, atol=1e-6))
-    ic(torch.allclose(d_xyz2_mashcpp, d_xyz2, atol=1e-6))
 
     ic(torch.allclose(dist1, dist1_mashcpp))
     ic(torch.allclose(idx1, idx1_mashcpp))
@@ -310,8 +281,8 @@ if __name__ == "__main__":
             x_names=["B", "N", "M"],
             x_vals=np.arange(0, 6) * 2000,
             line_arg="provider",
-            line_vals=["Triton", "CUDA"],
-            line_names=["Triton", "CUDA"],
+            line_vals=["Triton", "MASH"],
+            line_names=["Triton", "MASH"],
             styles=[("green", "-"), ("blue", "-")],
             ylabel="TFLOPS",
             plot_name="NMDist Performance",
@@ -325,7 +296,7 @@ if __name__ == "__main__":
         xyz1 = torch.randn(B, 1600, 3).cuda()
         xyz2 = torch.randn(B, 1000, 3).cuda()
         quantiles = [0.5, 0.2, 0.8]
-        if provider == "CUDA":
+        if provider == "MASH":
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: mash_cpp.toChamferDistance(xyz1, xyz2), quantiles=quantiles
             )
