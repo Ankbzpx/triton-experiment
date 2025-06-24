@@ -153,7 +153,7 @@ def nm_dist_kernel(
 def get_config(M):
     block_dim_m = np.array([256, 512, 1024, 2048])
     block_dim_n = np.array([32, 16, 32, 16])
-    num_warps = np.array([2, 2, 4, 4])
+    num_warps = np.array([2, 2, 2, 4])
 
     tails = triton.cdiv(M, block_dim_m)
     idx = np.argmin(tails)
@@ -277,7 +277,7 @@ if __name__ == "__main__":
     xyz2.requires_grad_(True)
 
     dist1, idx1, dist2, idx2 = chamfer_distance(xyz1, xyz2)
-    exit()
+    # exit()
 
     dist1_mashcpp, dist2_mashcpp, idx1_mashcpp, idx2_mashcpp = (
         mash_cpp.toChamferDistance(xyz1, xyz2)
