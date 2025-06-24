@@ -24,6 +24,19 @@ def get_cuda_autotune_config():
         for BLOCK_SIZE_B in [1, 16, 32]
         for BLOCK_SIZE_N in [16, 32, 64]
         for num_warps in [2, 4, 8]
+    ] + [
+        triton.Config(
+            {
+                "BLOCK_SIZE_B": BLOCK_SIZE_B,
+                "BLOCK_SIZE_N": BLOCK_SIZE_N,
+                "BLOCK_SIZE_M": int(65536 / BLOCK_SIZE_B / BLOCK_SIZE_N),
+            },
+            num_warps=num_warps,
+            num_stages=3,
+        )
+        for BLOCK_SIZE_B in [1, 16, 32]
+        for BLOCK_SIZE_N in [16, 32, 64]
+        for num_warps in [2, 4, 8]
     ]
 
 
@@ -96,8 +109,8 @@ def nm_dist_kernel(
                 diff = xyz1[:, None] - xyz2[None, :]
                 d += diff * diff
 
-            best_d = tl.min(d, axis=1)
-            best_idx = tl.argmin(d, axis=1) + base_m
+            best_d, best_idx = tl.min(d, axis=1, return_indices=True)
+            best_idx += base_m
 
             lock = lock_ptr + pid_b * lock_stride_b + pid_n * lock_stride_n
             while tl.atomic_cas(lock, 0, 1, sem="acq_rel", scope="cta") == 1:
@@ -131,15 +144,21 @@ def nm_dist_kernel(
             tl.atomic_xchg(lock, 0, sem="release", scope="cta")
 
 
-# Heuristic..
-def cmp(M, dim1, dim2):
-    n1 = triton.cdiv(M, dim1)
-    n2 = triton.cdiv(M, dim2)
+def get_config(M):
+    block_dim_m = np.array([256, 512, 1024, 2048])
+    block_dim_n = np.array([32, 16, 32, 16])
+    num_warps = np.array([2, 2, 4, 4])
 
-    if n1 * dim1 - M < n2 * dim2 - M:
-        return True
-    else:
-        return False
+    tails = triton.cdiv(M, block_dim_m)
+    idx = np.argmin(tails)
+
+    return {
+        "BLOCK_SIZE_B": 1,
+        "BLOCK_SIZE_N": block_dim_n[idx].item(),
+        "BLOCK_SIZE_M": block_dim_m[idx].item(),
+        "num_warps": num_warps[idx].item(),
+        "num_stages": 3,
+    }
 
 
 def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
@@ -159,23 +178,7 @@ def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
         triton.cdiv(B, META["BLOCK_SIZE_B"]),
     )
 
-    configs = (
-        {
-            "BLOCK_SIZE_B": 1,
-            "BLOCK_SIZE_N": 16,
-            "BLOCK_SIZE_M": 512,
-            "num_warps": 2,
-            "num_stages": 3,
-        }
-        if cmp(M, 512, 2048)
-        else {
-            "BLOCK_SIZE_B": 1,
-            "BLOCK_SIZE_N": 16,
-            "BLOCK_SIZE_M": 2048,
-            "num_warps": 4,
-            "num_stages": 3,
-        }
-    )
+    configs = get_config(M)
 
     # FIXME: Lock size is overkill...
     lock = torch.zeros(
