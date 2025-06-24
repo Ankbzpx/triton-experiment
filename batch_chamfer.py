@@ -178,7 +178,6 @@ def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
 
     configs = get_config(M)
 
-    # FIXME: Lock size is overkill...
     lock = torch.zeros(
         (
             triton.cdiv(B, configs["BLOCK_SIZE_B"]),
