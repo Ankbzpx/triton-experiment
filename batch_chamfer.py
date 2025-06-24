@@ -85,58 +85,66 @@ def nm_dist_kernel(
         batch_base_b = base_b + offset
 
         if batch_base_b < B:
-            d = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_M), tl.float32)
+            d = tl.zeros((1, BLOCK_SIZE_N, BLOCK_SIZE_M), tl.float32)
             for i in tl.static_range(3):
-                xyz1 = tl.load(
-                    xyz1_ptr
-                    + batch_base_b * xyz1_stride_b
-                    + batch_base_n * xyz1_stride_n
-                    + i * xyz1_stride_d,
-                    mask=batch_n_mask,
-                    other=float("inf"),
-                    cache_modifier=".ca",
+                xyz1_block_ptr = tl.make_block_ptr(
+                    base=xyz1_ptr + i,
+                    shape=(B, N),
+                    strides=(xyz1_stride_b, xyz1_stride_n),
+                    offsets=(batch_base_b, base_n),
+                    block_shape=(1, BLOCK_SIZE_N),
+                    order=(1, 0),
                 )
-                xyz2 = tl.load(
-                    xyz2_ptr
-                    + batch_base_b * xyz2_stride_b
-                    + batch_base_m * xyz2_stride_m
-                    + i * xyz2_stride_d,
-                    mask=batch_m_mask,
-                    other=-float("inf"),
-                    cache_modifier=".ca",
-                )
+                xyz1 = tl.load(xyz1_block_ptr)
+                xyz1 = tl.where(batch_n_mask[None, :], xyz1, float("inf"))
 
-                diff = xyz1[:, None] - xyz2[None, :]
+                xyz2_block_ptr = tl.make_block_ptr(
+                    base=xyz2_ptr + i,
+                    shape=(B, M),
+                    strides=(xyz2_stride_b, xyz2_stride_m),
+                    offsets=(batch_base_b, base_m),
+                    block_shape=(1, BLOCK_SIZE_M),
+                    order=(1, 0),
+                )
+                xyz2 = tl.load(xyz2_block_ptr)
+                xyz2 = tl.where(batch_m_mask[None, :], xyz2, -float("inf"))
+
+                diff = xyz1[:, :, None] - xyz2[:, None, :]
                 d += diff * diff
 
-            best_d, best_idx = tl.min(d, axis=1, return_indices=True)
+            best_d, best_idx = tl.min(d, axis=2, return_indices=True)
             best_idx += base_m
 
             lock = lock_ptr + pid_b * lock_stride_b + pid_n * lock_stride_n
             while tl.atomic_cas(lock, 0, 1, sem="acq_rel", scope="cta") == 1:
                 pass
 
-            cur_best_d = tl.load(
-                dists_ptr + batch_base_b * dist_stride_b + batch_base_n * dist_stride_n,
-                mask=batch_n_mask,
-                eviction_policy="evict_first",
+            cur_best_d_block_ptr = tl.make_block_ptr(
+                base=dists_ptr,
+                shape=(B, N),
+                strides=(dist_stride_b, dist_stride_n),
+                offsets=(batch_base_b, base_n),
+                block_shape=(1, BLOCK_SIZE_N),
+                order=(1, 0),
+            )
+            cur_best_idx_block_ptr = tl.make_block_ptr(
+                base=indices_ptr,
+                shape=(B, N),
+                strides=(indices_stride_b, indices_stride_n),
+                offsets=(batch_base_b, base_n),
+                block_shape=(1, BLOCK_SIZE_N),
+                order=(1, 0),
             )
 
-            out_mask = (best_d < cur_best_d) & batch_n_mask
-            tl.store(
-                dists_ptr + batch_base_b * dist_stride_b + batch_base_n * dist_stride_n,
-                best_d,
-                mask=out_mask,
-                eviction_policy="evict_first",
-            )
-            tl.store(
-                indices_ptr
-                + batch_base_b * indices_stride_b
-                + batch_base_n * indices_stride_n,
-                best_idx,
-                mask=out_mask,
-                eviction_policy="evict_first",
-            )
+            cur_best_d = tl.load(cur_best_d_block_ptr)
+            cur_best_idx = tl.load(cur_best_idx_block_ptr)
+
+            save_mask = best_d < cur_best_d
+            cur_best_d = tl.where(save_mask, best_d, cur_best_d)
+            cur_best_idx = tl.where(save_mask, best_idx, cur_best_idx)
+
+            tl.store(cur_best_d_block_ptr, cur_best_d, boundary_check=(0, 1))
+            tl.store(cur_best_idx_block_ptr, cur_best_idx, boundary_check=(0, 1))
 
             # Release lock
             tl.atomic_xchg(lock, 0, sem="release", scope="cta")
