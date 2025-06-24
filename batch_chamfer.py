@@ -224,7 +224,7 @@ def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
         "num_stages": 3,
     }
 
-    nm_dist_kernel[grid](
+    compiled_kernel = nm_dist_kernel[grid](
         xyz1,
         xyz2,
         dists,
@@ -247,10 +247,48 @@ def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
     return dists, indices
 
 
-def chamfer_distance(xyz1: torch.Tensor, xyz2: torch.Tensor):
+@torch.library.custom_op("mash::chamfer_distance", mutates_args=())
+def chamfer_distance(xyz1: torch.Tensor, xyz2: torch.Tensor) -> List[torch.Tensor]:
     dist1, idx1 = nm_dist(xyz1, xyz2)
     dist2, idx2 = nm_dist(xyz2, xyz1)
     return dist1, idx1, dist2, idx2
+
+
+def chamfer_distance_setup_context(ctx, inputs, output):
+    xyz1, xyz2 = inputs
+    _, idx1, _, idx2 = output
+    ctx.save_for_backward(xyz1, idx1, xyz2, idx2)
+
+
+def chamfer_distance_backward(ctx, grad_out):
+    xyz1, idx1, xyz2, idx2 = ctx.saved_tensors
+    grad_dist1, _, grad_dist2, _ = grad_out
+
+    d1 = xyz1 - torch.gather(xyz2, 1, idx1[..., None].expand(-1, -1, 3).long())
+    d2 = xyz2 - torch.gather(xyz1, 1, idx2[..., None].expand(-1, -1, 3).long())
+
+    d_dist1 = grad_dist1[..., None] * 2 * d1
+    d_dist2 = grad_dist2[..., None] * 2 * d2
+
+    grad_xyz1 = torch.scatter_add(
+        d_dist1, 1, idx2[..., None].expand(-1, -1, 3).long(), -d_dist2
+    )
+    grad_xyz2 = torch.scatter_add(
+        d_dist2, 1, idx1[..., None].expand(-1, -1, 3).long(), -d_dist1
+    )
+    return grad_xyz1, grad_xyz2
+
+
+chamfer_distance.register_autograd(
+    chamfer_distance_backward, setup_context=chamfer_distance_setup_context
+)
+
+
+def gradient(y, x, grad_outputs=None):
+    if grad_outputs is None:
+        grad_outputs = torch.ones_like(y)
+    grad = torch.autograd.grad(y, [x], grad_outputs=grad_outputs, create_graph=True)[0]
+    return grad
 
 
 if __name__ == "__main__":
@@ -261,13 +299,30 @@ if __name__ == "__main__":
     xyz1 = torch.randn(10000, 1600, 3).cuda()
     xyz2 = torch.randn(10000, 1000, 3).cuda()
 
-    dist1, idx1 = nm_dist(xyz1, xyz2)
-    dist2, idx2 = nm_dist(xyz2, xyz1)
+    xyz1.requires_grad_(True)
+    xyz2.requires_grad_(True)
+
+    dist1, idx1, dist2, idx2 = chamfer_distance(xyz1, xyz2)
     # exit()
 
     dist1_mashcpp, dist2_mashcpp, idx1_mashcpp, idx2_mashcpp = (
         mash_cpp.toChamferDistance(xyz1, xyz2)
     )
+
+    def test_loss(d1: torch.Tensor, d2: torch.Tensor):
+        return d1.mean() - d2.sum()
+
+    loss = test_loss(dist1, dist2)
+    loss_mashcpp = test_loss(dist1_mashcpp, dist2_mashcpp)
+
+    d_xyz1 = gradient(loss, xyz1)
+    d_xyz2 = gradient(loss, xyz2)
+
+    d_xyz1_mashcpp = gradient(loss_mashcpp, xyz1)
+    d_xyz2_mashcpp = gradient(loss_mashcpp, xyz2)
+
+    ic(torch.allclose(d_xyz1_mashcpp, d_xyz1, atol=1e-6))
+    ic(torch.allclose(d_xyz2_mashcpp, d_xyz2, atol=1e-6))
 
     ic(torch.allclose(dist1, dist1_mashcpp))
     ic(torch.allclose(idx1, idx1_mashcpp))
