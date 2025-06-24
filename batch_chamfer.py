@@ -93,7 +93,7 @@ def nm_dist_kernel(
                     + batch_base_n * xyz1_stride_n
                     + i * xyz1_stride_d,
                     mask=batch_n_mask,
-                    other=100,
+                    other=float("inf"),
                     cache_modifier=".ca",
                 )
                 xyz2 = tl.load(
@@ -102,7 +102,7 @@ def nm_dist_kernel(
                     + batch_base_m * xyz2_stride_m
                     + i * xyz2_stride_d,
                     mask=batch_m_mask,
-                    other=-100,
+                    other=-float("inf"),
                     cache_modifier=".ca",
                 )
 
@@ -122,9 +122,7 @@ def nm_dist_kernel(
                 eviction_policy="evict_first",
             )
 
-            # Handle zero initialization in JAX
-            # FIXME: The safer option is to use another lock for first occuring pid_n initialization
-            out_mask = ((best_d < cur_best_d) | (cur_best_d == 0)) & batch_n_mask
+            out_mask = (best_d < cur_best_d) & batch_n_mask
             tl.store(
                 dists_ptr + batch_base_b * dist_stride_b + batch_base_n * dist_stride_n,
                 best_d,
@@ -169,7 +167,7 @@ def nm_dist(xyz1: torch.Tensor, xyz2: torch.Tensor):
     B, N, D = xyz1.shape
     B, M, D = xyz2.shape
 
-    dists = torch.zeros((B, N), device=xyz1.device, dtype=xyz1.dtype)
+    dists = torch.inf * torch.ones((B, N), device=xyz1.device, dtype=xyz1.dtype)
     indices = torch.zeros((B, N), device=xyz1.device, dtype=torch.int32)
 
     grid = lambda META: (
