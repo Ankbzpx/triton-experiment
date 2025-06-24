@@ -281,8 +281,8 @@ if __name__ == "__main__":
             x_names=["B", "N", "M"],
             x_vals=np.arange(0, 6) * 2000,
             line_arg="provider",
-            line_vals=["Triton", "MASH"],
-            line_names=["Triton", "MASH"],
+            line_vals=["Triton", "CUDA"],
+            line_names=["Triton", "CUDA"],
             styles=[("green", "-"), ("blue", "-")],
             ylabel="TFLOPS",
             plot_name="NMDist Performance",
@@ -296,7 +296,7 @@ if __name__ == "__main__":
         xyz1 = torch.randn(B, 1600, 3).cuda()
         xyz2 = torch.randn(B, 1000, 3).cuda()
         quantiles = [0.5, 0.2, 0.8]
-        if provider == "MASH":
+        if provider == "CUDA":
             ms, min_ms, max_ms = triton.testing.do_bench(
                 lambda: mash_cpp.toChamferDistance(xyz1, xyz2), quantiles=quantiles
             )
