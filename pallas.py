@@ -137,7 +137,7 @@ def nmdist_pallas(xyz1, xyz2, BLOCK_SIZE_N, BLOCK_SIZE_M):
 
 
 @partial(jax.jit, static_argnames=["BLOCK_SIZE_N", "BLOCK_SIZE_M"])
-def chamfer_pallas(xyz1, xyz2, BLOCK_SIZE_N, BLOCK_SIZE_M):
+def batched_nmdist_pallas(xyz1, xyz2, BLOCK_SIZE_N, BLOCK_SIZE_M):
     return vmap(nmdist_pallas, in_axes=(0, 0, None, None))(
         xyz1, xyz2, BLOCK_SIZE_N, BLOCK_SIZE_M
     )
@@ -153,12 +153,12 @@ def test_performance(cfg, N, M, n=10):
     ]
 
     # warmup
-    _ = (chamfer_pallas(**data[0], **cfg)[-1].block_until_ready(),)
+    _ = (batched_nmdist_pallas(**data[0], **cfg)[-1].block_until_ready(),)
 
     start_time = time.time()
 
     for i in range(n):
-        chamfer_pallas(**data[i], **cfg)[-1].block_until_ready()
+        batched_nmdist_pallas(**data[i], **cfg)[-1].block_until_ready()
 
     pallas_time = time.time() - start_time
     average_time = pallas_time / n
@@ -166,11 +166,47 @@ def test_performance(cfg, N, M, n=10):
     return average_time
 
 
+def cdiv(x: int, y: int):
+    return (x + y - 1) // y
+
+
+def get_block_dim(M):
+    block_dim_m = np.array([256, 512, 1024, 2048])
+    tails = cdiv(M, block_dim_m)
+    idx = np.argmin(tails)
+    return block_dim_m[idx].item()
+
+
+@partial(jax.jit, static_argnames=["BLOCK_SIZE_M_1", "BLOCK_SIZE_M_2"])
+def _chamfer_distance_pallas(xyz1, xyz2, BLOCK_SIZE_M_1, BLOCK_SIZE_M_2):
+    dist1, idx1 = vmap(nmdist_pallas, in_axes=(0, 0, None, None))(
+        xyz1, xyz2, 16, BLOCK_SIZE_M_1
+    )
+    dist2, idx2 = vmap(nmdist_pallas, in_axes=(0, 0, None, None))(
+        xyz2, xyz1, 16, BLOCK_SIZE_M_2
+    )
+    return dist1, idx1, dist2, idx2
+
+
+def chamfer_distance_pallas(xyz1, xyz2):
+    return _chamfer_distance_pallas(
+        xyz1, xyz2, get_block_dim(xyz2.shape[1]), get_block_dim(xyz1.shape[1])
+    )
+
+
 if __name__ == "__main__":
+    key1, key2 = jax.random.split(jax.random.PRNGKey(0))
+    xyz1 = jax.random.normal(key1, (10000, 1600, 3))
+    xyz2 = jax.random.normal(key2, (10000, 1000, 3))
+
+    chamfer_distance_pallas(xyz1, xyz2)
+
+    exit()
+
     cfgs = [
         {"BLOCK_SIZE_N": BLOCK_SIZE_N, "BLOCK_SIZE_M": BLOCK_SIZE_M}
-        for BLOCK_SIZE_N in [16, 32, 64, 128, 256, 512, 1024, 2048]
-        for BLOCK_SIZE_M in [16, 32, 64, 128, 256, 512, 1024, 2048]
+        for BLOCK_SIZE_N in [16, 32, 64, 128]
+        for BLOCK_SIZE_M in [256, 512, 1024, 2048]
     ]
 
     ts = []
