@@ -5,6 +5,7 @@ import jax
 from jax import numpy as jnp, jit, vmap
 from jax.experimental import pallas as pl
 from functools import partial
+import time
 
 from icecream import ic
 
@@ -103,13 +104,10 @@ def nmdist_kernel_pallas(
     )
 
 
-@jit
-def nmdist_pallas(xyz1, xyz2):
+@partial(jax.jit, static_argnames=["BLOCK_SIZE_N", "BLOCK_SIZE_M"])
+def nmdist_pallas(xyz1, xyz2, BLOCK_SIZE_N, BLOCK_SIZE_M):
     N, D = xyz1.shape
     M, D = xyz2.shape
-
-    BLOCK_SIZE_N = 16
-    BLOCK_SIZE_M = 512
 
     kernel = partial(
         nmdist_kernel_pallas,
@@ -138,10 +136,51 @@ def nmdist_pallas(xyz1, xyz2):
     return secondary_reduction(dist, idx)
 
 
-if __name__ == "__main__":
-    key1, key2 = jax.random.split(jax.random.PRNGKey(0))
-    xyz1 = jax.random.normal(key1, (10000, 1600, 3))
-    xyz2 = jax.random.normal(key2, (10000, 1000, 3))
+@partial(jax.jit, static_argnames=["BLOCK_SIZE_N", "BLOCK_SIZE_M"])
+def chamfer_pallas(xyz1, xyz2, BLOCK_SIZE_N, BLOCK_SIZE_M):
+    dist1, idx1 = vmap(nmdist_pallas, in_axes=(0, 0, None, None))(
+        xyz1, xyz2, BLOCK_SIZE_N, BLOCK_SIZE_M
+    )
+    dist2, idx2 = vmap(nmdist_pallas, in_axes=(0, 0, None, None))(
+        xyz1, xyz2, BLOCK_SIZE_N, BLOCK_SIZE_M
+    )
+    return dist1, idx1, dist2, idx2
 
-    dist1, idx1 = vmap(nmdist_pallas)(xyz1, xyz2)
-    dist2, idx2 = vmap(nmdist_pallas)(xyz2, xyz1)
+
+def test_performance(cfg, n=10):
+    data = [
+        {
+            "xyz1": jax.random.normal(jax.random.PRNGKey(i), (10000, 1600, 3)),
+            "xyz2": jax.random.normal(jax.random.PRNGKey(i + 1), (10000, 1600, 3)),
+        }
+        for i in range(n)
+    ]
+
+    # warmup
+    _ = (chamfer_pallas(**data[0], **cfg)[-1].block_until_ready(),)
+
+    start_time = time.time()
+
+    for i in range(n):
+        chamfer_pallas(**data[i], **cfg)[-1].block_until_ready()
+
+    pallas_time = time.time() - start_time
+    average_time = pallas_time / n
+    print(f"Average time: {average_time:.5f}s", cfg)
+    return average_time
+
+
+if __name__ == "__main__":
+    cfgs = [
+        {"BLOCK_SIZE_N": BLOCK_SIZE_N, "BLOCK_SIZE_M": BLOCK_SIZE_M}
+        for BLOCK_SIZE_N in [16, 32, 64, 128, 256, 512, 1024, 2048]
+        for BLOCK_SIZE_M in [16, 32, 64, 128, 256, 512, 1024, 2048]
+    ]
+
+    ts = []
+    for cfg in cfgs:
+        t = test_performance(cfg)
+        ts.append(t)
+
+    best_idx = np.argmin(jnp.array(ts))
+    print("Best", ts[best_idx], cfgs[best_idx])
