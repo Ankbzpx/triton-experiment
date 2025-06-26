@@ -138,20 +138,16 @@ def nmdist_pallas(xyz1, xyz2, BLOCK_SIZE_N, BLOCK_SIZE_M):
 
 @partial(jax.jit, static_argnames=["BLOCK_SIZE_N", "BLOCK_SIZE_M"])
 def chamfer_pallas(xyz1, xyz2, BLOCK_SIZE_N, BLOCK_SIZE_M):
-    dist1, idx1 = vmap(nmdist_pallas, in_axes=(0, 0, None, None))(
+    return vmap(nmdist_pallas, in_axes=(0, 0, None, None))(
         xyz1, xyz2, BLOCK_SIZE_N, BLOCK_SIZE_M
     )
-    dist2, idx2 = vmap(nmdist_pallas, in_axes=(0, 0, None, None))(
-        xyz1, xyz2, BLOCK_SIZE_N, BLOCK_SIZE_M
-    )
-    return dist1, idx1, dist2, idx2
 
 
-def test_performance(cfg, n=10):
+def test_performance(cfg, N, M, n=10):
     data = [
         {
-            "xyz1": jax.random.normal(jax.random.PRNGKey(i), (10000, 1600, 3)),
-            "xyz2": jax.random.normal(jax.random.PRNGKey(i + 1), (10000, 1600, 3)),
+            "xyz1": jax.random.normal(jax.random.PRNGKey(i), (10000, N, 3)),
+            "xyz2": jax.random.normal(jax.random.PRNGKey(i + 1), (10000, M, 3)),
         }
         for i in range(n)
     ]
@@ -179,8 +175,18 @@ if __name__ == "__main__":
 
     ts = []
     for cfg in cfgs:
-        t = test_performance(cfg)
+        t = test_performance(cfg, 1600, 1000)
         ts.append(t)
 
     best_idx = np.argmin(jnp.array(ts))
+    print("==============")
+    print("Best", ts[best_idx], cfgs[best_idx])
+
+    ts = []
+    for cfg in cfgs:
+        t = test_performance(cfg, 1000, 1600)
+        ts.append(t)
+
+    best_idx = np.argmin(jnp.array(ts))
+    print("==============")
     print("Best", ts[best_idx], cfgs[best_idx])
