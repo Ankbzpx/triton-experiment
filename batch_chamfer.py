@@ -3,6 +3,10 @@ import torch
 from torch.profiler import profile, record_function, ProfilerActivity
 from scipy.spatial.distance import cdist
 from typing import List
+import jax
+import torch.utils
+import torch.utils.dlpack
+from pallas import chamfer_distance_jax
 
 import triton
 import triton.language as tl
@@ -291,9 +295,34 @@ def gradient(y, x, grad_outputs=None):
     return grad
 
 
-if __name__ == "__main__":
-    import mash_cpp
+def batched_chamfer_distance_jax(xyz1, xyz2):
+    dist1_jax, idx1_jax, dist2_jax, idx2_jax = jax.vmap(chamfer_distance_jax)(
+        jax.dlpack.from_dlpack(xyz1.detach()), jax.dlpack.from_dlpack(xyz2.detach())
+    )
+    return (
+        torch.utils.dlpack.from_dlpack(dist1_jax),
+        torch.utils.dlpack.from_dlpack(idx1_jax),
+        torch.utils.dlpack.from_dlpack(dist2_jax),
+        torch.utils.dlpack.from_dlpack(idx2_jax),
+    )
 
+
+def eval_chamfer_distance_jax(xyz1, xyz2, loss_func):
+    def eval_func(xyz1, xyz2):
+        dist1_jax, _, dist2_jax, _ = jax.vmap(chamfer_distance_jax)(xyz1, xyz2)
+        return loss_func(dist1_jax, dist2_jax)
+
+    d_xyz1_jax, d_xyz2_jax = jax.grad(eval_func, argnums=(0, 1))(
+        jax.dlpack.from_dlpack(xyz1.detach()), jax.dlpack.from_dlpack(xyz2.detach())
+    )
+
+    return (
+        torch.utils.dlpack.from_dlpack(d_xyz1_jax),
+        torch.utils.dlpack.from_dlpack(d_xyz2_jax),
+    )
+
+
+if __name__ == "__main__":
     torch.manual_seed(0)
 
     xyz1 = torch.randn(10000, 1600, 3).cuda()
@@ -303,31 +332,24 @@ if __name__ == "__main__":
     xyz2.requires_grad_(True)
 
     dist1, idx1, dist2, idx2 = chamfer_distance(xyz1, xyz2)
-    # exit()
+    dist1_jax, idx1_jax, dist2_jax, idx2_jax = batched_chamfer_distance_jax(xyz1, xyz2)
 
-    dist1_mashcpp, dist2_mashcpp, idx1_mashcpp, idx2_mashcpp = (
-        mash_cpp.toChamferDistance(xyz1, xyz2)
-    )
+    ic(torch.allclose(dist1, dist1_jax))
+    ic(torch.allclose(idx1, idx1_jax))
+    ic(torch.allclose(dist2, dist2_jax))
+    ic(torch.allclose(idx2, idx2_jax))
 
-    def test_loss(d1: torch.Tensor, d2: torch.Tensor):
+    def test_loss(d1, d2):
         return d1.mean() - d2.sum()
 
     loss = test_loss(dist1, dist2)
-    loss_mashcpp = test_loss(dist1_mashcpp, dist2_mashcpp)
-
     d_xyz1 = gradient(loss, xyz1)
     d_xyz2 = gradient(loss, xyz2)
 
-    d_xyz1_mashcpp = gradient(loss_mashcpp, xyz1)
-    d_xyz2_mashcpp = gradient(loss_mashcpp, xyz2)
+    d_xyz1_jax, d_xyz2_jax = eval_chamfer_distance_jax(xyz1, xyz2, test_loss)
 
-    ic(torch.allclose(d_xyz1_mashcpp, d_xyz1, atol=1e-6))
-    ic(torch.allclose(d_xyz2_mashcpp, d_xyz2, atol=1e-6))
-
-    ic(torch.allclose(dist1, dist1_mashcpp))
-    ic(torch.allclose(idx1, idx1_mashcpp))
-    ic(torch.allclose(dist2, dist2_mashcpp))
-    ic(torch.allclose(idx2, idx2_mashcpp))
+    ic(torch.allclose(d_xyz1, d_xyz1_jax, atol=1e-6))
+    ic(torch.allclose(d_xyz2, d_xyz2_jax, atol=1e-6))
     # exit()
 
     configs = []
@@ -336,8 +358,8 @@ if __name__ == "__main__":
             x_names=["B", "N", "M"],
             x_vals=np.arange(0, 6) * 2000,
             line_arg="provider",
-            line_vals=["Triton", "CUDA"],
-            line_names=["Triton", "CUDA"],
+            line_vals=["Triton", "Pallas"],
+            line_names=["Triton", "Pallas"],
             styles=[("green", "-"), ("blue", "-")],
             ylabel="TFLOPS",
             plot_name="NMDist Performance",
@@ -351,9 +373,9 @@ if __name__ == "__main__":
         xyz1 = torch.randn(B, 1600, 3).cuda()
         xyz2 = torch.randn(B, 1000, 3).cuda()
         quantiles = [0.5, 0.2, 0.8]
-        if provider == "CUDA":
+        if provider == "Pallas":
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: mash_cpp.toChamferDistance(xyz1, xyz2), quantiles=quantiles
+                lambda: batched_chamfer_distance_jax(xyz1, xyz2), quantiles=quantiles
             )
         if provider == "Triton":
             ms, min_ms, max_ms = triton.testing.do_bench(

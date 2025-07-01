@@ -178,20 +178,41 @@ def get_block_dim(M):
 
 
 @partial(jax.jit, static_argnames=["BLOCK_SIZE_M_1", "BLOCK_SIZE_M_2"])
-def _chamfer_distance_pallas(xyz1, xyz2, BLOCK_SIZE_M_1, BLOCK_SIZE_M_2):
-    dist1, idx1 = vmap(nmdist_pallas, in_axes=(0, 0, None, None))(
-        xyz1, xyz2, 16, BLOCK_SIZE_M_1
-    )
-    dist2, idx2 = vmap(nmdist_pallas, in_axes=(0, 0, None, None))(
-        xyz2, xyz1, 16, BLOCK_SIZE_M_2
-    )
+def chamfer_distance_pallas(xyz1, xyz2, BLOCK_SIZE_M_1, BLOCK_SIZE_M_2):
+    dist1, idx1 = nmdist_pallas(xyz1, xyz2, 16, BLOCK_SIZE_M_1)
+    dist2, idx2 = nmdist_pallas(xyz2, xyz1, 16, BLOCK_SIZE_M_2)
     return dist1, idx1, dist2, idx2
 
 
-def chamfer_distance_pallas(xyz1, xyz2):
-    return _chamfer_distance_pallas(
-        xyz1, xyz2, get_block_dim(xyz2.shape[1]), get_block_dim(xyz1.shape[1])
+@jax.custom_vjp
+def chamfer_distance_jax(xyz1, xyz2):
+    dist1, idx1, dist2, idx2 = chamfer_distance_pallas(
+        xyz1, xyz2, get_block_dim(xyz1.shape[0]), get_block_dim(xyz2.shape[0])
     )
+    return (dist1, idx1, dist2, idx2)
+
+
+def chamfer_distance_fwd_jax(xyz1: jax.Array, xyz2: jax.Array):
+    dist1, idx1, dist2, idx2 = chamfer_distance_jax(xyz1, xyz2)
+    return (dist1, idx1, dist2, idx2), (xyz1, idx1, xyz2, idx2)
+
+
+@jit
+def chamfer_distance_bwd_jax(res, dz):
+    xyz1, idx1, xyz2, idx2 = res
+    dz1, _, dz2, _ = dz
+
+    d_dist1 = dz1[:, None] * 2 * (xyz1 - xyz2[idx1])
+    d_dist2 = dz2[:, None] * 2 * (xyz2 - xyz1[idx2])
+
+    dxyz1 = d_dist1.at[idx2, :].add(-d_dist2)
+    dxyz2 = d_dist2.at[idx1, :].add(-d_dist1)
+
+    return (dxyz1, dxyz2)
+
+
+chamfer_distance_jax.defvjp(chamfer_distance_fwd_jax, chamfer_distance_bwd_jax)
+
 
 
 if __name__ == "__main__":
@@ -199,7 +220,7 @@ if __name__ == "__main__":
     xyz1 = jax.random.normal(key1, (10000, 1600, 3))
     xyz2 = jax.random.normal(key2, (10000, 1000, 3))
 
-    chamfer_distance_pallas(xyz1, xyz2)
+    vmap(chamfer_distance_jax)(xyz1, xyz2)
 
     exit()
 
