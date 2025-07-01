@@ -41,68 +41,38 @@ def nmdist_kernel_pallas(
     base_m = pid_m * BLOCK_SIZE_M
 
     batch_base_n = base_n + jnp.arange(0, BLOCK_SIZE_N)
-    batch_n_mask = (batch_base_n < N)[:, None]
+    batch_n_mask = batch_base_n < N
 
     batch_base_m = base_m + jnp.arange(0, BLOCK_SIZE_M)
-    batch_m_mask = (batch_base_m < M)[:, None]
+    batch_m_mask = batch_base_m < M
 
-    xyz1_x = pl.load(
-        xyz1_ref,
-        (pl.dslice(None), pl.dslice(0, 1)),
-        mask=batch_n_mask,
-        other=jnp.inf,
-    )
+    xyz1_x = xyz1_ref[:, 0]
+    xyz1_y = xyz1_ref[:, 1]
+    xyz1_z = xyz1_ref[:, 2]
 
-    xyz1_y = pl.load(
-        xyz1_ref,
-        (pl.dslice(None), pl.dslice(1, 1)),
-        mask=batch_n_mask,
-        other=jnp.inf,
-    )
+    xyz1_x = jnp.where(batch_n_mask, xyz1_x, jnp.inf)
+    xyz1_y = jnp.where(batch_n_mask, xyz1_y, jnp.inf)
+    xyz1_z = jnp.where(batch_n_mask, xyz1_z, jnp.inf)
 
-    xyz1_z = pl.load(
-        xyz1_ref,
-        (pl.dslice(None), pl.dslice(2, 1)),
-        mask=batch_n_mask,
-        other=jnp.inf,
-    )
+    xyz2_x = xyz2_ref[:, 0]
+    xyz2_y = xyz2_ref[:, 1]
+    xyz2_z = xyz2_ref[:, 2]
 
-    xyz2_x = pl.load(
-        xyz2_ref,
-        (pl.dslice(None), pl.dslice(0, 1)),
-        mask=batch_m_mask,
-        other=-jnp.inf,
-    )
+    xyz2_x = jnp.where(batch_m_mask, xyz2_x, -jnp.inf)
+    xyz2_y = jnp.where(batch_m_mask, xyz2_y, -jnp.inf)
+    xyz2_z = jnp.where(batch_m_mask, xyz2_z, -jnp.inf)
 
-    xyz2_y = pl.load(
-        xyz2_ref,
-        (pl.dslice(None), pl.dslice(1, 1)),
-        mask=batch_m_mask,
-        other=-jnp.inf,
-    )
-
-    xyz2_z = pl.load(
-        xyz2_ref,
-        (pl.dslice(None), pl.dslice(2, 1)),
-        mask=batch_m_mask,
-        other=-jnp.inf,
-    )
-
-    x2 = xyz1_x[:, None, :] - xyz2_x[None, :, :]
-    y2 = xyz1_y[:, None, :] - xyz2_y[None, :, :]
-    z2 = xyz1_z[:, None, :] - xyz2_z[None, :, :]
+    x2 = xyz1_x[:, None] - xyz2_x[None, :]
+    y2 = xyz1_y[:, None] - xyz2_y[None, :]
+    z2 = xyz1_z[:, None] - xyz2_z[None, :]
     d = x2 * x2 + y2 * y2 + z2 * z2
 
     # jnp.min does not return indices
     best_d = jnp.min(d, axis=1)
     best_idx = jnp.argmin(d, axis=1) + base_m
 
-    pl.store(
-        dist_ref, (pl.dslice(None), pl.dslice(pid_m, 1)), best_d, mask=batch_n_mask
-    )
-    pl.store(
-        idx_ref, (pl.dslice(None), pl.dslice(pid_m, 1)), best_idx, mask=batch_n_mask
-    )
+    dist_ref[:, pid_m] = best_d
+    idx_ref[:, pid_m] = best_idx
 
 
 @partial(jax.jit, static_argnames=["BLOCK_SIZE_N", "BLOCK_SIZE_M"])
@@ -123,7 +93,7 @@ def nmdist_pallas(xyz1, xyz2, BLOCK_SIZE_N, BLOCK_SIZE_M):
         grid=(pl.cdiv(N, BLOCK_SIZE_N), pl.cdiv(M, BLOCK_SIZE_M)),
         in_specs=[
             pl.BlockSpec((BLOCK_SIZE_N, D), lambda i, j: (i, 0)),
-            pl.BlockSpec((BLOCK_SIZE_M, D), lambda i, j: (0, j)),
+            pl.BlockSpec((BLOCK_SIZE_M, D), lambda i, j: (j, 0)),
         ],
         out_specs=[
             pl.BlockSpec((BLOCK_SIZE_N, 1), lambda i, j: (i, 0)),
@@ -225,16 +195,20 @@ if __name__ == "__main__":
         )
         return jax.dlpack.from_dlpack(dist1), jax.dlpack.from_dlpack(idx1)
 
-    key1, key2 = jax.random.split(jax.random.PRNGKey(0))
-    xyz1 = jax.random.normal(key1, (1, 19, 3))
-    xyz2 = jax.random.normal(key2, (1, 16, 3))
+    torch.manual_seed(0)
+
+    xyz1 = torch.randn(2, 16, 3).cuda()
+    xyz2 = torch.randn(2, 15, 3).cuda()
+
+    xyz1 = jax.dlpack.from_dlpack(xyz1)
+    xyz2 = jax.dlpack.from_dlpack(xyz2)
 
     dist2, idx2 = vmap(nmdist_pallas, in_axes=(0, 0, None, None))(xyz2, xyz1, 16, 16)
-
     dist2_torch, idx2_torch = nm_dist_torch(xyz2, xyz1)
 
-    ic(idx2)
-    ic(idx2_torch)
+    ic(idx2[1])
+    ic(idx2_torch[1])
+    # ic(nmdist_pallas(xyz2[1], xyz1[1], 16, 256)[1])
 
     ic(jnp.allclose(idx2, idx2_torch))
 
