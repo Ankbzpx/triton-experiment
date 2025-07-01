@@ -8,6 +8,7 @@ from functools import partial
 import time
 
 from icecream import ic
+import torch.utils.dlpack
 
 
 @jit
@@ -214,13 +215,28 @@ def chamfer_distance_bwd_jax(res, dz):
 chamfer_distance_jax.defvjp(chamfer_distance_fwd_jax, chamfer_distance_bwd_jax)
 
 
-
 if __name__ == "__main__":
-    key1, key2 = jax.random.split(jax.random.PRNGKey(0))
-    xyz1 = jax.random.normal(key1, (10000, 1600, 3))
-    xyz2 = jax.random.normal(key2, (10000, 1000, 3))
+    import torch
+    from batch_chamfer import nm_dist
 
-    vmap(chamfer_distance_jax)(xyz1, xyz2)
+    def nm_dist_torch(xyz1, xyz2):
+        dist1, idx1 = nm_dist(
+            torch.utils.dlpack.from_dlpack(xyz1), torch.utils.dlpack.from_dlpack(xyz2)
+        )
+        return jax.dlpack.from_dlpack(dist1), jax.dlpack.from_dlpack(idx1)
+
+    key1, key2 = jax.random.split(jax.random.PRNGKey(0))
+    xyz1 = jax.random.normal(key1, (1, 19, 3))
+    xyz2 = jax.random.normal(key2, (1, 16, 3))
+
+    dist2, idx2 = vmap(nmdist_pallas, in_axes=(0, 0, None, None))(xyz2, xyz1, 16, 16)
+
+    dist2_torch, idx2_torch = nm_dist_torch(xyz2, xyz1)
+
+    ic(idx2)
+    ic(idx2_torch)
+
+    ic(jnp.allclose(idx2, idx2_torch))
 
     exit()
 

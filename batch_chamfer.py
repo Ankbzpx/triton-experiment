@@ -3,10 +3,9 @@ import torch
 from torch.profiler import profile, record_function, ProfilerActivity
 from scipy.spatial.distance import cdist
 from typing import List
-import jax
 import torch.utils
 import torch.utils.dlpack
-from pallas import chamfer_distance_jax
+
 
 import triton
 import triton.language as tl
@@ -288,41 +287,43 @@ chamfer_distance.register_autograd(
 )
 
 
-def gradient(y, x, grad_outputs=None):
-    if grad_outputs is None:
-        grad_outputs = torch.ones_like(y)
-    grad = torch.autograd.grad(y, [x], grad_outputs=grad_outputs, create_graph=True)[0]
-    return grad
-
-
-def batched_chamfer_distance_jax(xyz1, xyz2):
-    dist1_jax, idx1_jax, dist2_jax, idx2_jax = jax.vmap(chamfer_distance_jax)(
-        jax.dlpack.from_dlpack(xyz1.detach()), jax.dlpack.from_dlpack(xyz2.detach())
-    )
-    return (
-        torch.utils.dlpack.from_dlpack(dist1_jax),
-        torch.utils.dlpack.from_dlpack(idx1_jax),
-        torch.utils.dlpack.from_dlpack(dist2_jax),
-        torch.utils.dlpack.from_dlpack(idx2_jax),
-    )
-
-
-def eval_chamfer_distance_jax(xyz1, xyz2, loss_func):
-    def eval_func(xyz1, xyz2):
-        dist1_jax, _, dist2_jax, _ = jax.vmap(chamfer_distance_jax)(xyz1, xyz2)
-        return loss_func(dist1_jax, dist2_jax)
-
-    d_xyz1_jax, d_xyz2_jax = jax.grad(eval_func, argnums=(0, 1))(
-        jax.dlpack.from_dlpack(xyz1.detach()), jax.dlpack.from_dlpack(xyz2.detach())
-    )
-
-    return (
-        torch.utils.dlpack.from_dlpack(d_xyz1_jax),
-        torch.utils.dlpack.from_dlpack(d_xyz2_jax),
-    )
-
-
 if __name__ == "__main__":
+    import jax
+    from pallas import chamfer_distance_jax
+
+    def batched_chamfer_distance_jax(xyz1, xyz2):
+        dist1_jax, idx1_jax, dist2_jax, idx2_jax = jax.vmap(chamfer_distance_jax)(
+            jax.dlpack.from_dlpack(xyz1.detach()), jax.dlpack.from_dlpack(xyz2.detach())
+        )
+        return (
+            torch.utils.dlpack.from_dlpack(dist1_jax),
+            torch.utils.dlpack.from_dlpack(idx1_jax),
+            torch.utils.dlpack.from_dlpack(dist2_jax),
+            torch.utils.dlpack.from_dlpack(idx2_jax),
+        )
+
+    def eval_chamfer_distance_jax(xyz1, xyz2, loss_func):
+        def eval_func(xyz1, xyz2):
+            dist1_jax, _, dist2_jax, _ = jax.vmap(chamfer_distance_jax)(xyz1, xyz2)
+            return loss_func(dist1_jax, dist2_jax)
+
+        d_xyz1_jax, d_xyz2_jax = jax.grad(eval_func, argnums=(0, 1))(
+            jax.dlpack.from_dlpack(xyz1.detach()), jax.dlpack.from_dlpack(xyz2.detach())
+        )
+
+        return (
+            torch.utils.dlpack.from_dlpack(d_xyz1_jax),
+            torch.utils.dlpack.from_dlpack(d_xyz2_jax),
+        )
+
+    def gradient(y, x, grad_outputs=None):
+        if grad_outputs is None:
+            grad_outputs = torch.ones_like(y)
+        grad = torch.autograd.grad(
+            y, [x], grad_outputs=grad_outputs, create_graph=True
+        )[0]
+        return grad
+
     torch.manual_seed(0)
 
     xyz1 = torch.randn(10000, 1600, 3).cuda()
