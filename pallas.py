@@ -189,28 +189,29 @@ if __name__ == "__main__":
     import torch
     from batch_chamfer import nm_dist
 
-    def nm_dist_torch(xyz1, xyz2):
-        dist1, idx1 = nm_dist(
-            torch.utils.dlpack.from_dlpack(xyz1), torch.utils.dlpack.from_dlpack(xyz2)
-        )
-        return jax.dlpack.from_dlpack(dist1), jax.dlpack.from_dlpack(idx1)
-
     torch.manual_seed(0)
 
     xyz1 = torch.randn(2, 16, 3).cuda()
     xyz2 = torch.randn(2, 15, 3).cuda()
 
+    import mash_cpp
+
+    _, dist2_mashcpp, _, idx2_mashcpp = mash_cpp.toChamferDistance(xyz1, xyz2)
+    dist2_triton, idx2_triton = nm_dist(xyz2, xyz1)
+
     xyz1 = jax.dlpack.from_dlpack(xyz1)
     xyz2 = jax.dlpack.from_dlpack(xyz2)
 
-    dist2, idx2 = vmap(nmdist_pallas, in_axes=(0, 0, None, None))(xyz2, xyz1, 16, 16)
-    dist2_torch, idx2_torch = nm_dist_torch(xyz2, xyz1)
+    dist2_jax, idx2_jax = vmap(nmdist_pallas, in_axes=(0, 0, None, None))(
+        xyz2, xyz1, 16, 16
+    )
 
-    ic(idx2[1])
-    ic(idx2_torch[1])
-    # ic(nmdist_pallas(xyz2[1], xyz1[1], 16, 256)[1])
+    ic(idx2_triton[1])
+    ic(idx2_mashcpp[1])
+    ic(idx2_jax[1])
 
-    ic(jnp.allclose(idx2, idx2_torch))
+    dist2_jax, idx2_jax = nmdist_pallas(xyz2[1], xyz1[1], 16, 16)
+    ic(idx2_jax)
 
     exit()
 
